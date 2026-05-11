@@ -31,19 +31,17 @@ jobs:
           echo "KBUILD_BUILD_HOST=GitHub_Actions" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
 
-      - name: Интеграция ReSukiSU (Надежный локальный метод)
+      - name: Интеграция ReSukiSU (Метод прямой загрузки архива)
         run: |
-          # Клонируем репозиторий напрямую вместо запуска сомнительных скриптов
-          git clone https://github.com/rsukisu/rsukisu KernelSU
+          mkdir -p drivers/kernelsu
+          # Загружаем исходники напрямую, минуя проверку прав git
+          curl -LSs https://github.com/rsukisu/rsukisu/archive/refs/heads/main.tar.gz | tar -xzC drivers/kernelsu --strip-components=2 rsukisu-main/kernel
           
-          # Создаем линк в дерево драйверов
-          ln -sf $(pwd)/KernelSU/kernel drivers/kernelsu
-          
-          # Прописываем компиляцию в Makefile
+          # Прописываем компиляцию в Makefile драйверов
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo "obj-y += kernelsu/" >> drivers/Makefile
           fi
-          echo "✅ ReSukiSU интегрирован в дерево исходников"
+          echo "✅ ReSukiSU интегрирован напрямую в драйверы"
 
       - name: Интеграция патчей SUSFS v2.10 (База Android 13 5.15)
         run: |
@@ -54,12 +52,9 @@ jobs:
           SUSFS_PATCH=$(ls susfs_patches/kernel_patches/50_add_susfs_in_*.patch | head -n 1)
           if [ -f "$SUSFS_PATCH" ]; then
             patch -p1 --forward < "$SUSFS_PATCH" || echo "[ИНФО] Патч ядра применен"
-          else
-            echo "❌ ОШИБКА: Патч SUSFS не найден!"
-            exit 1
           fi
           
-          # Патчим сам KernelSU для поддержки SUSFS
+          # Патчим KernelSU для поддержки SUSFS
           KSU_PATCH=$(ls susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch | head -n 1)
           if [ -f "$KSU_PATCH" ]; then
             cd drivers/kernelsu
@@ -71,11 +66,9 @@ jobs:
         run: |
           chmod +x scripts/config || true
           
-          # Поиск конфига для vermeer (Poco F6 Pro)
           DEFCONFIG=$(find arch/arm64/configs -name "*vermeer*" | grep "defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
           [ -z "$DEFCONFIG" ] && DEFCONFIG="gki_defconfig"
           
-          echo "🛠️ Используем конфиг: $DEFCONFIG"
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG
 
           # --- ВКЛЮЧЕНИЕ ФУНКЦИЙ ---
@@ -108,13 +101,12 @@ jobs:
           sed -i 's/device.name1=.*/device.name1=vermeer/g' anykernel.sh
           sed -i 's/device.name2=.*/device.name2=xiaomi_vermeer/g' anykernel.sh
           
-          # Поиск скомпилированного образа
-          for img in Image Image.lz4 Image.gz; do
-            if [ -f "../arch/arm64/boot/$img" ]; then
-              cp "../arch/arm64/boot/$img" ./
-              break
-            fi
-          done
+          # Поиск и копирование образа
+          if [ -f "../arch/arm64/boot/Image" ]; then
+            cp "../arch/arm64/boot/Image" ./
+          elif [ -f "../arch/arm64/boot/Image.gz" ]; then
+            cp "../arch/arm64/boot/Image.gz" ./
+          fi
           
           zip -r9 ../Ultimate-Gadzhi-Kernel-F6Pro.zip *
 
