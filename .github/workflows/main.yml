@@ -1,0 +1,179 @@
+name: Build ULTIMATE Gadzhi-Kernel for Poco F6 Pro
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compile Gadzhi Custom Kernel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Загрузка исходников ядра
+        uses: actions/checkout@v4
+
+      - name: Установка системных зависимостей (Полный GKI-пакет + ZSTD)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache cpio curl flex g++-multilib gcc-multilib git gnupg gperf lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf dwarves libelf-dev zstd
+
+      - name: Установка тулчейна (Neutron Clang)
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/clang
+          cd $GITHUB_WORKSPACE/clang
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S
+          echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
+
+      - name: Настройка переменных окружения (Брендирование)
+        run: |
+          echo "KBUILD_BUILD_USER=Gadzhi" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_HOST=GitHub_Actions" >> $GITHUB_ENV
+          echo "ARCH=arm64" >> $GITHUB_ENV
+
+      - name: Интеграция ReSukiSU
+        run: |
+          set -e
+          curl -LSs "https://raw.githubusercontent.com/rsukisu/rsukisu/main/kernel/setup.sh" | bash -
+
+      - name: Интеграция патчей SUSFS v2.10 (Строго под базу Android 13 5.15)
+        run: |
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
+          cp -r susfs_patches/kernel_patches/fs/* ./fs/
+          cp -r susfs_patches/kernel_patches/include/linux/* ./include/linux/
+          
+          SUSFS_PATCH=$(ls susfs_patches/kernel_patches/50_add_susfs_in_*.patch | head -n 1)
+          if [ -f "$SUSFS_PATCH" ]; then
+            patch -p1 --forward < "$SUSFS_PATCH" || echo "[ИНФО] Патч ядра применен с допустимыми конфликтами"
+          else
+            echo "❌ КРИТИЧЕСКАЯ ОШИБКА: Патч 50_add_susfs не найден!"
+            exit 1
+          fi
+          
+          KSU_DIR=$(find . -maxdepth 1 -type d -iname "*su*" | grep -iE "kernelsu|rsukisu" | head -n 1)
+          KSU_PATCH=$(ls susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch | head -n 1)
+          
+          if [ -n "$KSU_DIR" ] && [ -f "$KSU_PATCH" ]; then
+            cd "$KSU_DIR"
+            patch -p1 --forward < "../$KSU_PATCH" || echo "[ИНФО] Патч менеджера применен"
+            cd ..
+          fi
+
+      - name: Конфигурация МЕГА-ФИШЕК (Умный локатор и Tweaks)
+        run: |
+          chmod +x scripts/config || true
+          
+          DEFCONFIG=$(find arch/arm64/configs -name "*vermeer*" | grep "defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
+          if [ -z "$DEFCONFIG" ]; then
+            echo "[ИНФО] Конфиг vermeer не найден! Используем базовый gki_defconfig."
+            DEFCONFIG="gki_defconfig"
+          fi
+          echo "✅ Используем конфиг: $DEFCONFIG"
+          
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabihf- $DEFCONFIG
+
+          # --- СКРЫТНОСТЬ ---
+          scripts/config -e KSU
+          scripts/config -e KSU_SUSFS
+          scripts/config -e KSU_SUSFS_SUS_PATH
+          scripts/config -e KSU_SUSFS_SUS_MOUNT
+          scripts/config -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+          scripts/config -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+          scripts/config -e KSU_SUSFS_SPOOF_UNAME
+          
+          # --- СЕТЬ ---
+          scripts/config -e TCP_CONG_BBR
+          scripts/config -e TCP_CONG_WESTWOOD
+          scripts/config -e DEFAULT_BBR
+          scripts/config -e NET_SCH_FQ_CODEL
+          scripts/config -e NET_SCH_DEFAULT
+          scripts/config --set-str DEFAULT_NET_SCH fq_codel
+          scripts/config -e WIREGUARD
+          scripts/config -e NETFILTER_XT_TARGET_HL
+          scripts/config -e NETFILTER_XT_MATCH_HL
+          
+          # --- ПРОИЗВОДИТЕЛЬНОСТЬ ---
+          scripts/config -d HZ_250
+          scripts/config -d HZ_300
+          scripts/config -e HZ_1000
+          scripts/config --set-val HZ 1000
+          scripts/config -e LRU_GEN
+          scripts/config -e LRU_GEN_ENABLED
+          scripts/config -e SCHED_WALT
+          scripts/config -e ENERGY_MODEL
+          
+          # --- ПАМЯТЬ И ФС ---
+          scripts/config -e ZRAM
+          scripts/config -e CRYPTO_ZSTD
+          scripts/config -e ZRAM_DEF_COMP_ZSTD
+          scripts/config --set-str ZRAM_DEF_COMP zstd
+          scripts/config -e F2FS_FS
+          scripts/config -e DYNAMIC_FSYNC
+          scripts/config -e IOSCHED_ZEN
+          scripts/config -e IOSCHED_MAPLE
+          
+          # --- АППАРАТНОЕ ШИФРОВАНИЕ И ЭКРАН ---
+          scripts/config -e KCAL
+          scripts/config -e MDSS_KCAL_CTRL
+          scripts/config -e LRNG
+          scripts/config -e CRYPTO_AES_ARM64_CE_BLK
+          scripts/config -e CRYPTO_AES_ARM64_CE_CCM
+          scripts/config -e CRYPTO_SHA2_ARM64_CE
+          scripts/config -d UFS_FAULT_INJECTION
+          scripts/config -d MMC_CRC
+          
+          # --- ОПТИМИЗАЦИЯ СБОРКИ ---
+          scripts/config -e LTO_CLANG
+          scripts/config -e LTO_CLANG_THIN
+          scripts/config -d LTO_NONE
+          scripts/config -d DEBUG_KERNEL
+          scripts/config -d DEBUG_INFO
+          scripts/config -d THERMAL_STATISTICS
+          scripts/config -d BLK_DEV_INITRD
+          
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabihf- olddefconfig
+
+      - name: Компиляция Ядра (Vermeer)
+        run: |
+          make -j$(nproc --all) ARCH=arm64 \
+               LLVM=1 LLVM_IAS=1 \
+               CROSS_COMPILE=aarch64-linux-gnu- \
+               CROSS_COMPILE_COMPAT=arm-linux-gnueabihf-
+
+      - name: Упаковка в прошиваемый ZIP (AnyKernel3 - Smart Pack)
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git
+          cd AnyKernel3
+          rm -rf .git
+          
+          # Жесткая конфигурация AnyKernel3 для защиты от ошибок TWRP
+          sed -i 's/kernel.string=.*/kernel.string=Ultimate-Gadzhi-Kernel-F6Pro/g' anykernel.sh
+          sed -i 's/do.modules=.*/do.modules=0/g' anykernel.sh
+          sed -i 's/device.name1=.*/device.name1=vermeer/g' anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=xiaomi_vermeer/g' anykernel.sh
+          sed -i 's/device.name3=.*/device.name3=Redmi K70/g' anykernel.sh
+          sed -i 's/device.name4=.*/device.name4=Poco F6 Pro/g' anykernel.sh
+          sed -i 's/block=.*/block=auto;/g' anykernel.sh
+          
+          KERNEL_FOUND=false
+          for img in Image Image.lz4 Image.gz Image-dtb Image.gz-dtb Image.lz4-dtb; do
+            if [ -f "../arch/arm64/boot/$img" ]; then
+              cp "../arch/arm64/boot/$img" ./
+              echo "✅ Успешно найдено и скопировано ядро: $img"
+              KERNEL_FOUND=true
+              break
+            fi
+          done
+          
+          if [ "$KERNEL_FOUND" = false ]; then
+            echo "❌ КРИТИЧЕСКАЯ ОШИБКА: Файл скомпилированного ядра не найден!"
+            exit 1
+          fi
+          
+          zip -r9 ../Ultimate-Gadzhi-Kernel-F6Pro.zip * -x README.md *placeholder
+
+      - name: Загрузка финального архива
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ultimate-Gadzhi-Kernel-F6Pro
+          path: Ultimate-Gadzhi-Kernel-F6Pro.zip
