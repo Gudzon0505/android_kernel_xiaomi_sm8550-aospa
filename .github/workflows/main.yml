@@ -1,84 +1,343 @@
-name: Сборка ULTIMATE Vermeer (v11.0 - Kconfig Fix)
+name: Build Kernel - POCO F6 Pro (Vermeer) для Lunaris 3.10
 
 on:
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Ветка MiCode (u-oss для Android 14 / t-oss для 13)'
+        required: true
+        default: 'bsp-vermeer-u-oss'
+      susfs_branch:
+        description: 'Ветка SUSFS'
+        required: true
+        default: 'gki-android14-5.15'
 
 jobs:
   build:
-    name: Компиляция (SM8550 / Vermeer)
+    name: Compile (SM8550 / Vermeer / POCO F6 Pro)
     runs-on: ubuntu-22.04
-    steps:
-      - name: 1. Окружение
-        run: sudo apt-get update && sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev pahole
+    env:
+      KBUILD_BUILD_USER: "gadzhi"
+      KBUILD_BUILD_HOST: "github-actions"
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: "5G"
 
-      - name: 2. Исходники (Ветка T-OSS)
+    steps:
+      # ───────────────────────────────────────────────
+      - name: 1. Установка зависимостей
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential cpio curl flex git gnupg gperf \
+            libssl-dev libxml2-utils zip zstd python3 \
+            dwarves libelf-dev ccache \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            device-tree-compiler
+
+      # ───────────────────────────────────────────────
+      - name: 2. Клонирование исходников ядра
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
-          ref: bsp-vermeer-t-oss
+          ref: ${{ github.event.inputs.branch }}
           fetch-depth: 1
+          path: kernel
 
-      - name: 3. Установка Clang 17.0.6
+      # ───────────────────────────────────────────────
+      - name: 3. Проверка структуры репозитория
+        working-directory: kernel
+        run: |
+          echo "=== Версия ядра ==="
+          head -5 Makefile
+          echo ""
+          echo "=== Все defconfig'и ==="
+          find arch/arm64/configs -type f | sort
+          echo ""
+          echo "=== Структура drivers/ ==="
+          ls drivers/ | head -30
+
+      # ───────────────────────────────────────────────
+      - name: 4. Кэширование Clang
+        id: clang-cache
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: clang-17.0.6-ubuntu22
+
+      - name: 5. Установка Clang 17.0.6
+        if: steps.clang-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p $GITHUB_WORKSPACE/clang
           cd $GITHUB_WORKSPACE/clang
-          curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-          tar -xJf *.tar.xz --strip-components=1
+          curl -L -o clang.tar.xz \
+            https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          tar -xJf clang.tar.xz --strip-components=1
+          rm clang.tar.xz
+
+      - name: 6. Добавление Clang в PATH
+        run: |
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
+          $GITHUB_WORKSPACE/clang/bin/clang --version
 
-      - name: 4. ReSukiSU + SUSFS
-        run: |
-          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
-          mkdir -p drivers/kernelsu
-          cp -af ksutmp/kernel/. drivers/kernelsu/
-          sed -i '/git/,+4d' drivers/kernelsu/Kbuild
-          echo "obj-y += kernelsu/" >> drivers/Makefile
-          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
-          patch -p1 < susfs_patches/kernel_patches/50_add_susfs_in_*.patch || true
-          cp -r susfs_patches/kernel_patches/fs/* ./fs/
-          cp -r susfs_patches/kernel_patches/include/linux/* ./include/linux/
-          cd drivers/kernelsu && patch -p1 < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
-          echo "KSU_SRC_PATH=$(pwd)/drivers/kernelsu" >> $GITHUB_ENV
+      # ───────────────────────────────────────────────
+      - name: 7. ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-vermeer-${{ github.run_id }}
+          restore-keys: |
+            ccache-vermeer-
 
-      - name: 5. Исправление битых ссылок Kconfig (Xiaomi Fix)
+      # ───────────────────────────────────────────────
+      - name: 8. Интеграция ReSukiSU (KernelSU)
+        working-directory: kernel
         run: |
-          # Исправляем ошибку на строке 525 в drivers/misc/Kconfig
-          sed -i '525s/^/#/' drivers/misc/Kconfig || true
-          # На всякий случай фиксим возможные дубли в fs/Kconfig
-          sed -i '/susfs/d' fs/Kconfig
-          echo 'source "fs/susfs/Kconfig"' >> fs/Kconfig
-          echo "✅ Битые ссылки в Kconfig обезврежены"
-
-      - name: 6. Конфигурация (Vermeer Defconfig)
-        run: |
-          # Ищем конфиг по всем возможным путям
-          CONF_PATH=$(find arch/arm64/configs -name "vermeer_defconfig" | head -n 1)
-          [ -z "$CONF_PATH" ] && CONF_PATH=$(find arch/arm64/configs -name "kalama_defconfig" | head -n 1)
-          DEFCONFIG=$(echo $CONF_PATH | sed 's|arch/arm64/configs/||')
+          set -e
+          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ../ksutmp
           
-          echo "🚀 Используем конфиг: $DEFCONFIG"
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG
-          scripts/config -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE -e CONFIG_DEBUG_INFO_BTF
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          if [ ! -d ../ksutmp/kernel ]; then
+            echo "❌ ReSukiSU: папка kernel не найдена!"
+            ls ../ksutmp
+            exit 1
+          fi
+          
+          mkdir -p drivers/kernelsu
+          cp -af ../ksutmp/kernel/. drivers/kernelsu/
+          
+          # Убираем git-зависимости из Kbuild (если есть)
+          if [ -f drivers/kernelsu/Kbuild ]; then
+            sed -i '/git/,+4d' drivers/kernelsu/Kbuild || true
+          fi
+          
+          # Регистрация в build-системе
+          if ! grep -q "kernelsu" drivers/Makefile; then
+            echo "obj-y += kernelsu/" >> drivers/Makefile
+          fi
+          
+          if ! grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
+            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          fi
+          
+          echo "KSU_SRC_PATH=$(pwd)/drivers/kernelsu" >> $GITHUB_ENV
+          echo "✅ KernelSU интегрирован"
+          ls drivers/kernelsu/ | head
 
-      - name: 7. Компиляция
+      # ───────────────────────────────────────────────
+      - name: 9. Применение SUSFS патчей
+        working-directory: kernel
         run: |
-          make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- KSU_SRC=$KSU_SRC_PATH
+          set -e
+          git clone --depth=1 \
+            https://gitlab.com/simonpunk/susfs4ksu.git \
+            -b ${{ github.event.inputs.susfs_branch }} \
+            ../susfs_patches
+          
+          PATCH=$(ls ../susfs_patches/kernel_patches/50_add_susfs_in_*.patch 2>/dev/null | head -1)
+          if [ -z "$PATCH" ]; then
+            echo "❌ SUSFS патч не найден!"
+            ls ../susfs_patches/kernel_patches/
+            exit 1
+          fi
+          
+          echo "📦 Применяем: $PATCH"
+          if ! patch -p1 < "$PATCH"; then
+            echo "⚠️ Часть SUSFS патча не применилась — проверь .rej файлы"
+            find . -name "*.rej" 2>/dev/null
+          fi
+          
+          # Копирование SUSFS-файлов
+          cp -r ../susfs_patches/kernel_patches/fs/* ./fs/
+          cp -r ../susfs_patches/kernel_patches/include/linux/* ./include/linux/
+          
+          # Патч для KernelSU
+          KSU_PATCH="../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+          if [ -f "$KSU_PATCH" ]; then
+            cd drivers/kernelsu
+            if ! patch -p1 < "../../$KSU_PATCH"; then
+              echo "⚠️ KSU SUSFS patch не применился полностью"
+            fi
+            cd ../..
+          fi
+          
+          # Верификация
+          if [ ! -d fs/susfs ] && [ ! -f fs/susfs.c ]; then
+            echo "⚠️ SUSFS файлы не найдены в fs/ — может, структура другая"
+            ls fs/ | grep -i sus || true
+          else
+            echo "✅ SUSFS файлы на месте"
+          fi
 
-      - name: 8. AnyKernel3 (Target init_boot)
+      # ───────────────────────────────────────────────
+      - name: 10. Автофикс битых ссылок Kconfig
+        working-directory: kernel
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
-          cd AnyKernel3
-          sed -i "s/device.name1=.*/device.name1=vermeer/" anykernel.sh
-          sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
+          set -e
+          echo "🔍 Поиск битых source-директив в Kconfig..."
+          
+          fix_kconfig() {
+            local file=$1
+            [ ! -f "$file" ] && return
+            grep -nP '^\s*source\s+"' "$file" 2>/dev/null | while IFS=: read -r line _; do
+              path=$(sed -n "${line}p" "$file" | grep -oP 'source\s+"\K[^"]+')
+              [ -z "$path" ] && continue
+              # Раскрытие $(...) переменных пропускаем
+              if echo "$path" | grep -q '\$'; then continue; fi
+              if [ ! -f "$path" ]; then
+                echo "❌ Битая ссылка в $file:$line → $path"
+                sed -i "${line}s|^|# BROKEN: |" "$file"
+              fi
+            done
+          }
+          
+          fix_kconfig drivers/misc/Kconfig
+          fix_kconfig drivers/Kconfig
+          
+          # Регистрация SUSFS Kconfig (если он есть и не зарегистрирован)
+          if [ -f fs/susfs/Kconfig ] && ! grep -q "susfs/Kconfig" fs/Kconfig; then
+            echo 'source "fs/susfs/Kconfig"' >> fs/Kconfig
+            echo "✅ fs/susfs/Kconfig зарегистрирован"
+          fi
+          
+          echo "✅ Kconfig обработан"
+
+      # ───────────────────────────────────────────────
+      - name: 11. Конфигурация ядра
+        working-directory: kernel
+        run: |
+          set -e
+          
+          # Поиск defconfig
+          CONF_PATH=$(find arch/arm64/configs -name "vermeer_defconfig" 2>/dev/null | head -1)
+          [ -z "$CONF_PATH" ] && CONF_PATH=$(find arch/arm64/configs -name "*vermeer*" -type f 2>/dev/null | head -1)
+          [ -z "$CONF_PATH" ] && CONF_PATH=$(find arch/arm64/configs -name "kalama_GKI.config" 2>/dev/null | head -1)
+          [ -z "$CONF_PATH" ] && CONF_PATH=$(find arch/arm64/configs -name "*kalama*defconfig*" 2>/dev/null | head -1)
+          
+          if [ -z "$CONF_PATH" ]; then
+            echo "❌ Defconfig не найден! Все варианты:"
+            find arch/arm64/configs -type f
+            exit 1
+          fi
+          
+          DEFCONFIG=$(basename "$CONF_PATH")
+          REL_PATH=${CONF_PATH#arch/arm64/configs/}
+          echo "🚀 Используем: $REL_PATH"
+          
+          # На случай если конфиг в подпапке (vendor/)
+          if [ "$REL_PATH" != "$DEFCONFIG" ]; then
+            cp "$CONF_PATH" "arch/arm64/configs/$DEFCONFIG"
+          fi
+          
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out $DEFCONFIG
+          
+          # Активация KSU + SUSFS
+          ./scripts/config --file out/.config \
+            -e KSU \
+            -e KSU_SUSFS \
+            -e KSU_SUSFS_HAS_MAGIC_MOUNT \
+            -e KSU_SUSFS_SUS_PATH \
+            -e KSU_SUSFS_SUS_MOUNT \
+            -e KSU_SUSFS_SUS_KSTAT \
+            -e KSU_SUSFS_TRY_UMOUNT \
+            -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            -e KSU_SUSFS_OPEN_REDIRECT \
+            -e KSU_SUSFS_ENABLE_LOG \
+            -e DEBUG_INFO_BTF \
+            -d LTO_CLANG_FULL \
+            -e LTO_CLANG_THIN
+          
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          
+          echo "=== Финальные настройки KSU/SUSFS ==="
+          grep -E "KSU|SUSFS" out/.config || true
+
+      # ───────────────────────────────────────────────
+      - name: 12. Компиляция ядра
+        working-directory: kernel
+        run: |
+          set -e
+          export PATH="/usr/lib/ccache:$PATH"
+          
+          make -j$(nproc --all) \
+            ARCH=arm64 \
+            O=out \
+            LLVM=1 LLVM_IAS=1 \
+            CC="ccache clang" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            KSU_SRC=$KSU_SRC_PATH \
+            2>&1 | tee build.log
+          
+          echo ""
+          echo "=== Артефакты сборки ==="
+          ls -la out/arch/arm64/boot/ || true
+          find out/arch/arm64/boot/dts -name "*.dtb" 2>/dev/null | head -5
+
+      # ───────────────────────────────────────────────
+      - name: 13. Сборка AnyKernel3 (init_boot)
+        working-directory: kernel
+        run: |
+          set -e
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ../AnyKernel3
+          cd ../AnyKernel3
+          
+          # Настройка anykernel.sh под Vermeer / GKI
+          sed -i 's|kernel.string=.*|kernel.string=Gadzhi-Vermeer для POCO F6 Pro|' anykernel.sh
+          sed -i 's|do.devicecheck=.*|do.devicecheck=1|' anykernel.sh
+          sed -i 's|device.name1=.*|device.name1=vermeer|' anykernel.sh
+          sed -i 's|device.name2=.*|device.name2=Vermeer|' anykernel.sh
+          sed -i 's|device.name3=.*|device.name3=POCO F6 Pro|' anykernel.sh
+          sed -i 's|device.name4=.*|device.name4=|' anykernel.sh
+          sed -i 's|device.name5=.*|device.name5=|' anykernel.sh
+          sed -i 's|supported.versions=.*|supported.versions=|' anykernel.sh
+          sed -i 's|is_slot_device=.*|is_slot_device=1|' anykernel.sh
           sed -i 's|block=.*|block=/dev/block/by-name/init_boot|' anykernel.sh
-          cp ../arch/arm64/boot/Image.gz ./
-          find ../arch/arm64/boot/dts/vendor/qcom -name "*kalama*.dtb" -exec cp {} ./dtb \;
-          zip -r9 ../Gadzhi-Vermeer-V11.zip *
+          
+          # Копируем Image (несжатый для GKI init_boot)
+          if [ -f ../kernel/out/arch/arm64/boot/Image ]; then
+            cp ../kernel/out/arch/arm64/boot/Image ./
+            echo "✅ Image скопирован"
+          elif [ -f ../kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp ../kernel/out/arch/arm64/boot/Image.gz ./
+            echo "⚠️ Используется Image.gz (Image не найден)"
+          else
+            echo "❌ Ядро не собрано!"
+            ls ../kernel/out/arch/arm64/boot/
+            exit 1
+          fi
+          
+          # Склейка DTB (правильно — через cat в один файл)
+          DTB_DIR=../kernel/out/arch/arm64/boot/dts/vendor/qcom
+          if [ -d "$DTB_DIR" ]; then
+            DTBS=$(find "$DTB_DIR" -name "*kalama*.dtb" 2>/dev/null)
+            if [ -n "$DTBS" ]; then
+              cat $DTBS > dtb
+              echo "✅ DTB склеен ($(echo "$DTBS" | wc -l) файлов)"
+            else
+              echo "⚠️ DTB для kalama не найден — пропускаем"
+            fi
+          fi
+          
+          # Финальный ZIP
+          DATE=$(date +%Y%m%d-%H%M)
+          ZIP_NAME="Gadzhi-Vermeer-Lunaris-${DATE}.zip"
+          zip -r9 "../$ZIP_NAME" * -x .git README.md *placeholder
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          echo "✅ Создан: $ZIP_NAME"
 
-      - name: 9. Загрузка
+      # ───────────────────────────────────────────────
+      - name: 14. Загрузка артефактов
         uses: actions/upload-artifact@v4
         with:
-          name: Gadzhi-Vermeer-V11
-          path: Gadzhi-Vermeer-V11.zip
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+
+      - name: 15. Загрузка build.log (на случай ошибок)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel/build.log
+          if-no-files-found: ignore
