@@ -11,10 +11,10 @@ jobs:
       - name: Загрузка исходников ядра
         uses: actions/checkout@v4
 
-      - name: Установка системных зависимостей (GKI + Ubuntu 24.04 Fixed)
+      - name: Установка системных зависимостей (Фикс Ubuntu 24.04)
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache cpio curl flex g++-multilib gcc-multilib git gnupg gperf liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf dwarves libelf-dev zstd libncurses6
+          sudo apt-get install -y bc bison build-essential ccache cpio curl flex g++-multilib gcc-multilib git gnupg gperf liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 dwarves libelf-dev zstd
 
       - name: Установка тулчейна (Neutron Clang)
         run: |
@@ -68,7 +68,8 @@ jobs:
             DEFCONFIG="gki_defconfig"
           fi
           
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabihf- $DEFCONFIG
+          # Мы убрали CROSS_COMPILE из системы, поэтому используем LLVM=1 для полной замены
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG
 
           # --- СКРЫТНОСТЬ ---
           scripts/config -e KSU
@@ -89,14 +90,11 @@ jobs:
           scripts/config -e CRYPTO_ZSTD
           scripts/config -e ZRAM_DEF_COMP_ZSTD
           
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabihf- olddefconfig
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
       - name: Компиляция Ядра (Vermeer)
         run: |
-          make -j$(nproc --all) ARCH=arm64 \
-               LLVM=1 LLVM_IAS=1 \
-               CROSS_COMPILE=aarch64-linux-gnu- \
-               CROSS_COMPILE_COMPAT=arm-linux-gnueabihf-
+          make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1
 
       - name: Упаковка в AnyKernel3
         run: |
@@ -106,8 +104,11 @@ jobs:
           sed -i 's/do.modules=.*/do.modules=0/g' anykernel.sh
           sed -i 's/device.name1=.*/device.name1=vermeer/g' anykernel.sh
           
+          # Проверка наличия образа
           if [ -f "../arch/arm64/boot/Image" ]; then
             cp "../arch/arm64/boot/Image" ./
+          elif [ -f "../arch/arm64/boot/Image.gz" ]; then
+            cp "../arch/arm64/boot/Image.gz" ./
           else
             echo "❌ ОШИБКА: Ядро не скомпилировалось!"
             exit 1
