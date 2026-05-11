@@ -1,12 +1,12 @@
-name: Сборка ULTIMATE Vermeer (FIX INIT_BOOT)
+name: Сборка ULTIMATE Vermeer (v11.0 - Kconfig Fix)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Компиляция для SM8550
-    runs-on: ubuntu-22.04 # Критично для Clang 17
+    name: Компиляция (SM8550 / Vermeer)
+    runs-on: ubuntu-22.04
     steps:
       - name: 1. Окружение
         run: sudo apt-get update && sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev pahole
@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
-          ref: bsp-vermeer-t-oss # Правильная ветка
+          ref: bsp-vermeer-t-oss
           fetch-depth: 1
 
       - name: 3. Установка Clang 17.0.6
@@ -26,46 +26,59 @@ jobs:
           tar -xJf *.tar.xz --strip-components=1
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
 
-      - name: 4. ReSukiSU + SUSFS (Маскировка)
+      - name: 4. ReSukiSU + SUSFS
         run: |
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
           mkdir -p drivers/kernelsu
           cp -af ksutmp/kernel/. drivers/kernelsu/
-          sed -i '/git/,+4d' drivers/kernelsu/Kbuild # Фикс субмодуля
+          sed -i '/git/,+4d' drivers/kernelsu/Kbuild
           echo "obj-y += kernelsu/" >> drivers/Makefile
           sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
-          patch -p1 < susfs_patches/kernel_patches/50_add_susfs_in_gki_android13_5.15.patch || true
+          patch -p1 < susfs_patches/kernel_patches/50_add_susfs_in_*.patch || true
           cp -r susfs_patches/kernel_patches/fs/* ./fs/
           cp -r susfs_patches/kernel_patches/include/linux/* ./include/linux/
           cd drivers/kernelsu && patch -p1 < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
           echo "KSU_SRC_PATH=$(pwd)/drivers/kernelsu" >> $GITHUB_ENV
 
-      - name: 5. Конфигурация (Vendor Defconfig)
+      - name: 5. Исправление битых ссылок Kconfig (Xiaomi Fix)
         run: |
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 vendor/vermeer_defconfig # Жесткий путь к конфигу
+          # Исправляем ошибку на строке 525 в drivers/misc/Kconfig
+          sed -i '525s/^/#/' drivers/misc/Kconfig || true
+          # На всякий случай фиксим возможные дубли в fs/Kconfig
+          sed -i '/susfs/d' fs/Kconfig
+          echo 'source "fs/susfs/Kconfig"' >> fs/Kconfig
+          echo "✅ Битые ссылки в Kconfig обезврежены"
+
+      - name: 6. Конфигурация (Vermeer Defconfig)
+        run: |
+          # Ищем конфиг по всем возможным путям
+          CONF_PATH=$(find arch/arm64/configs -name "vermeer_defconfig" | head -n 1)
+          [ -z "$CONF_PATH" ] && CONF_PATH=$(find arch/arm64/configs -name "kalama_defconfig" | head -n 1)
+          DEFCONFIG=$(echo $CONF_PATH | sed 's|arch/arm64/configs/||')
+          
+          echo "🚀 Используем конфиг: $DEFCONFIG"
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG
           scripts/config -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE -e CONFIG_DEBUG_INFO_BTF
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-      - name: 6. Компиляция
+      - name: 7. Компиляция
         run: |
           make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- KSU_SRC=$KSU_SRC_PATH
 
-      - name: 7. AnyKernel3 (БРОНЕБОЙНЫЙ ФИКС РАЗДЕЛА)
+      - name: 8. AnyKernel3 (Target init_boot)
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
           cd AnyKernel3
           sed -i "s/device.name1=.*/device.name1=vermeer/" anykernel.sh
           sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
-          # ЗАМЕНА ПУТИ НА INIT_BOOT (Критично для Vermeer)
-          sed -i 's|block=.*|block=/dev/block/by-name/init_boot;|' anykernel.sh
-          
-          cp ../arch/arm64/boot/Image.gz ./ # Только Image.gz для лимита 32МБ
-          find ../arch/arm64/boot/dts/vendor/qcom -name "*kalama*.dtb" -exec cp {} ./dtb \; # Драйверы дисплея
-          zip -r9 ../Gadzhi-Vermeer-V10.zip *
+          sed -i 's|block=.*|block=/dev/block/by-name/init_boot|' anykernel.sh
+          cp ../arch/arm64/boot/Image.gz ./
+          find ../arch/arm64/boot/dts/vendor/qcom -name "*kalama*.dtb" -exec cp {} ./dtb \;
+          zip -r9 ../Gadzhi-Vermeer-V11.zip *
 
-      - name: 8. Загрузка
+      - name: 9. Загрузка
         uses: actions/upload-artifact@v4
         with:
-          name: Gadzhi-Vermeer-V10
-          path: Gadzhi-Vermeer-V10.zip
+          name: Gadzhi-Vermeer-V11
+          path: Gadzhi-Vermeer-V11.zip
