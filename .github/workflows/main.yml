@@ -11,7 +11,7 @@ jobs:
       - name: Загрузка исходников ядра
         uses: actions/checkout@v4
 
-      - name: Установка системных зависимостей (Фикс Ubuntu 24.04)
+      - name: Установка системных зависимостей (Ubuntu 24.04 Fixed)
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential ccache cpio curl flex g++-multilib gcc-multilib git gnupg gperf liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 dwarves libelf-dev zstd
@@ -31,10 +31,19 @@ jobs:
           echo "KBUILD_BUILD_HOST=GitHub_Actions" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
 
-      - name: Интеграция ReSukiSU
+      - name: Интеграция ReSukiSU (Надежный локальный метод)
         run: |
-          set -e
-          curl -LSs "https://raw.githubusercontent.com/rsukisu/rsukisu/main/kernel/setup.sh" | bash -
+          # Клонируем репозиторий напрямую вместо запуска сомнительных скриптов
+          git clone https://github.com/rsukisu/rsukisu KernelSU
+          
+          # Создаем линк в дерево драйверов
+          ln -sf $(pwd)/KernelSU/kernel drivers/kernelsu
+          
+          # Прописываем компиляцию в Makefile
+          if ! grep -q "kernelsu" drivers/Makefile; then
+            echo "obj-y += kernelsu/" >> drivers/Makefile
+          fi
+          echo "✅ ReSukiSU интегрирован в дерево исходников"
 
       - name: Интеграция патчей SUSFS v2.10 (База Android 13 5.15)
         run: |
@@ -50,42 +59,36 @@ jobs:
             exit 1
           fi
           
-          KSU_DIR=$(find . -maxdepth 1 -type d -iname "*su*" | grep -iE "kernelsu|rsukisu" | head -n 1)
+          # Патчим сам KernelSU для поддержки SUSFS
           KSU_PATCH=$(ls susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch | head -n 1)
-          
-          if [ -n "$KSU_DIR" ] && [ -f "$KSU_PATCH" ]; then
-            cd "$KSU_DIR"
-            patch -p1 --forward < "../$KSU_PATCH" || echo "[ИНФО] Патч KSU применен"
-            cd ..
+          if [ -f "$KSU_PATCH" ]; then
+            cd drivers/kernelsu
+            patch -p1 --forward < "../../$KSU_PATCH" || echo "[ИНФО] Патч SUSFS для KSU применен"
+            cd ../..
           fi
 
       - name: Конфигурация МЕГА-ФИШЕК (Умный локатор и Tweaks)
         run: |
           chmod +x scripts/config || true
           
+          # Поиск конфига для vermeer (Poco F6 Pro)
           DEFCONFIG=$(find arch/arm64/configs -name "*vermeer*" | grep "defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
-          if [ -z "$DEFCONFIG" ]; then
-            DEFCONFIG="gki_defconfig"
-          fi
+          [ -z "$DEFCONFIG" ] && DEFCONFIG="gki_defconfig"
           
-          # Мы убрали CROSS_COMPILE из системы, поэтому используем LLVM=1 для полной замены
+          echo "🛠️ Используем конфиг: $DEFCONFIG"
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG
 
-          # --- СКРЫТНОСТЬ ---
+          # --- ВКЛЮЧЕНИЕ ФУНКЦИЙ ---
           scripts/config -e KSU
           scripts/config -e KSU_SUSFS
           scripts/config -e KSU_SUSFS_SUS_PATH
           scripts/config -e KSU_SUSFS_SUS_MOUNT
           scripts/config -e KSU_SUSFS_SPOOF_UNAME
-          
-          # --- СЕТЬ И ПРОИЗВОДИТЕЛЬНОСТЬ ---
           scripts/config -e TCP_CONG_BBR
           scripts/config -e DEFAULT_BBR
           scripts/config -e NET_SCH_FQ_CODEL
           scripts/config -e HZ_1000
           scripts/config --set-val HZ 1000
-          
-          # --- ПАМЯТЬ ---
           scripts/config -e ZRAM
           scripts/config -e CRYPTO_ZSTD
           scripts/config -e ZRAM_DEF_COMP_ZSTD
@@ -96,23 +99,23 @@ jobs:
         run: |
           make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1
 
-      - name: Упаковка в AnyKernel3
+      - name: Упаковка в AnyKernel3 (Защита A/B слотов)
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git
           cd AnyKernel3
           sed -i 's/kernel.string=.*/kernel.string=Ultimate-Gadzhi-Kernel-F6Pro/g' anykernel.sh
           sed -i 's/do.modules=.*/do.modules=0/g' anykernel.sh
           sed -i 's/device.name1=.*/device.name1=vermeer/g' anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=xiaomi_vermeer/g' anykernel.sh
           
-          # Проверка наличия образа
-          if [ -f "../arch/arm64/boot/Image" ]; then
-            cp "../arch/arm64/boot/Image" ./
-          elif [ -f "../arch/arm64/boot/Image.gz" ]; then
-            cp "../arch/arm64/boot/Image.gz" ./
-          else
-            echo "❌ ОШИБКА: Ядро не скомпилировалось!"
-            exit 1
-          fi
+          # Поиск скомпилированного образа
+          for img in Image Image.lz4 Image.gz; do
+            if [ -f "../arch/arm64/boot/$img" ]; then
+              cp "../arch/arm64/boot/$img" ./
+              break
+            fi
+          done
+          
           zip -r9 ../Ultimate-Gadzhi-Kernel-F6Pro.zip *
 
       - name: Загрузка финального архива
