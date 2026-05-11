@@ -1,4 +1,4 @@
-name: Build ULTIMATE Gadzhi-Kernel for Poco F6 Pro
+name: Сборка ULTIMATE Гаджи-Ядра для Poco F6 Pro
 
 on:
   workflow_dispatch:
@@ -8,15 +8,15 @@ jobs:
     name: Компиляция пользовательского ядра Гаджи
     runs-on: ubuntu-latest
     steps:
-      - name: Загрузка исходников ядра
+      - name: 1. Загрузка исходников ядра
         uses: actions/checkout@v4
 
-      - name: Установка системных зависимостей (Ubuntu 24.04 Fixed)
+      - name: 2. Установка системных зависимостей (Ubuntu 24.04 Noble)
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential ccache cpio curl flex g++-multilib gcc-multilib git gnupg gperf liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 dwarves libelf-dev zstd
 
-      - name: Установка тулчейна (Neutron Clang)
+      - name: 3. Установка тулчейна (Neutron Clang)
         run: |
           mkdir -p $GITHUB_WORKSPACE/clang
           cd $GITHUB_WORKSPACE/clang
@@ -25,53 +25,69 @@ jobs:
           ./antman -S
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
 
-      - name: Настройка переменных окружения (Брендирование)
+      - name: 4. Настройка переменных окружения
         run: |
           echo "KBUILD_BUILD_USER=Gadzhi" >> $GITHUB_ENV
           echo "KBUILD_BUILD_HOST=GitHub_Actions" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
 
-      - name: Интеграция ReSukiSU (Метод прямой загрузки архива)
+      - name: 5. Интеграция ReSukiSU (Нативный метод)
+        uses: actions/checkout@v4
+        with:
+          repository: rsukisu/rsukisu
+          path: ksutmp # Временная папка
+
+      - name: 6. Вшивание ReSukiSU в дерево драйверов
         run: |
-          mkdir -p drivers/kernelsu
-          # Загружаем исходники напрямую, минуя проверку прав git
-          curl -LSs https://github.com/rsukisu/rsukisu/archive/refs/heads/main.tar.gz | tar -xzC drivers/kernelsu --strip-components=2 rsukisu-main/kernel
+          # Копируем только ядро KernelSU в папку драйверов
+          cp -r ksutmp/kernel drivers/kernelsu
           
-          # Прописываем компиляцию в Makefile драйверов
+          # Регистрация в Makefile: если еще не добавлено, дописываем
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo "obj-y += kernelsu/" >> drivers/Makefile
           fi
-          echo "✅ ReSukiSU интегрирован напрямую в драйверы"
+          
+          # Регистрация в Kconfig: вставляем перед последним 'endmenu'
+          if ! grep -q "kernelsu" drivers/Kconfig; then
+            sed -i '$i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          fi
+          echo "✅ ReSukiSU успешно интегрирован"
 
-      - name: Интеграция патчей SUSFS v2.10 (База Android 13 5.15)
+      - name: 7. Интеграция патчей SUSFS v2.10
         run: |
+          # Клонируем патчи через git (это работает стабильнее curl)
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
+          
+          # Копируем файлы патчей
           cp -r susfs_patches/kernel_patches/fs/* ./fs/
           cp -r susfs_patches/kernel_patches/include/linux/* ./include/linux/
           
+          # Накладываем патч ядра (с игнорированием уже наложенных строк)
           SUSFS_PATCH=$(ls susfs_patches/kernel_patches/50_add_susfs_in_*.patch | head -n 1)
           if [ -f "$SUSFS_PATCH" ]; then
-            patch -p1 --forward < "$SUSFS_PATCH" || echo "[ИНФО] Патч ядра применен"
+            patch -p1 --forward < "$SUSFS_PATCH" || echo "[ИНФО] Патч ядра применен (или был применен ранее)"
           fi
           
           # Патчим KernelSU для поддержки SUSFS
           KSU_PATCH=$(ls susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch | head -n 1)
           if [ -f "$KSU_PATCH" ]; then
             cd drivers/kernelsu
-            patch -p1 --forward < "../../$KSU_PATCH" || echo "[ИНФО] Патч SUSFS для KSU применен"
+            patch -p1 --forward < "../../$KSU_PATCH" || echo "[ИНФО] Патч KSU применен"
             cd ../..
           fi
 
-      - name: Конфигурация МЕГА-ФИШЕК (Умный локатор и Tweaks)
+      - name: 8. Конфигурация ядра (vermeer / GKI)
         run: |
           chmod +x scripts/config || true
           
+          # Ищем дефконфиг для Poco F6 Pro
           DEFCONFIG=$(find arch/arm64/configs -name "*vermeer*" | grep "defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
           [ -z "$DEFCONFIG" ] && DEFCONFIG="gki_defconfig"
           
+          echo "🚀 Используем конфиг: $DEFCONFIG"
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG
 
-          # --- ВКЛЮЧЕНИЕ ФУНКЦИЙ ---
+          # --- ВКЛЮЧЕНИЕ СПЕЦ-ФУНКЦИЙ ---
           scripts/config -e KSU
           scripts/config -e KSU_SUSFS
           scripts/config -e KSU_SUSFS_SUS_PATH
@@ -88,11 +104,11 @@ jobs:
           
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-      - name: Компиляция Ядра (Vermeer)
+      - name: 9. Компиляция Ядра (Snapdragon 8 Gen 2)
         run: |
           make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1
 
-      - name: Упаковка в AnyKernel3 (Защита A/B слотов)
+      - name: 10. Упаковка в AnyKernel3 (Защита A/B слотов)
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git
           cd AnyKernel3
@@ -101,7 +117,6 @@ jobs:
           sed -i 's/device.name1=.*/device.name1=vermeer/g' anykernel.sh
           sed -i 's/device.name2=.*/device.name2=xiaomi_vermeer/g' anykernel.sh
           
-          # Поиск и копирование образа
           if [ -f "../arch/arm64/boot/Image" ]; then
             cp "../arch/arm64/boot/Image" ./
           elif [ -f "../arch/arm64/boot/Image.gz" ]; then
@@ -110,7 +125,7 @@ jobs:
           
           zip -r9 ../Ultimate-Gadzhi-Kernel-F6Pro.zip *
 
-      - name: Загрузка финального архива
+      - name: 11. Загрузка готового ядра
         uses: actions/upload-artifact@v4
         with:
           name: Ultimate-Gadzhi-Kernel-F6Pro
