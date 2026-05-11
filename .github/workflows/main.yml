@@ -1,98 +1,71 @@
-name: Сборка ULTIMATE Vermeer (Audited & Fixed)
+name: Сборка ULTIMATE Vermeer (FIX INIT_BOOT)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Компиляция (SM8550 / Vermeer)
-    runs-on: ubuntu-22.04 # Требование для Clang-17 и GLIBC
+    name: Компиляция для SM8550
+    runs-on: ubuntu-22.04 # Критично для Clang 17
     steps:
-      - name: 1. Зависимости
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev pahole
-          echo "✅ Окружение готово"
+      - name: 1. Окружение
+        run: sudo apt-get update && sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev pahole
 
-      - name: 2. Загрузка исходников (Correct Branch)
+      - name: 2. Исходники (Ветка T-OSS)
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
-          ref: bsp-vermeer-t-oss # Исправленная ветка
+          ref: bsp-vermeer-t-oss # Правильная ветка
           fetch-depth: 1
 
-      - name: 3. Кэшируемый Clang 17.0.6
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/clang
-          key: clang-17-0-6-vermeer
-          
-      - name: 4. Установка Clang
+      - name: 3. Установка Clang 17.0.6
         run: |
-          if [ ! -d "$GITHUB_WORKSPACE/clang/bin" ]; then
-            mkdir -p $GITHUB_WORKSPACE/clang
-            cd $GITHUB_WORKSPACE/clang
-            curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-            tar -xJf *.tar.xz --strip-components=1
-          fi
+          mkdir -p $GITHUB_WORKSPACE/clang
+          cd $GITHUB_WORKSPACE/clang
+          curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          tar -xJf *.tar.xz --strip-components=1
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
 
-      - name: 5. Интеграция ReSukiSU
+      - name: 4. ReSukiSU + SUSFS (Маскировка)
         run: |
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
           mkdir -p drivers/kernelsu
           cp -af ksutmp/kernel/. drivers/kernelsu/
-          sed -i '/git/,+4d' drivers/kernelsu/Kbuild # Фикс 5 строк проверки
+          sed -i '/git/,+4d' drivers/kernelsu/Kbuild # Фикс субмодуля
           echo "obj-y += kernelsu/" >> drivers/Makefile
-          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig # Фикс места вставки
-          echo "KSU_SRC_PATH=$(pwd)/drivers/kernelsu" >> $GITHUB_ENV
-
-      - name: 6. Интеграция SUSFS (Correct Order)
-        run: |
+          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
-          # ПРАВИЛЬНЫЙ ПОРЯДОК: Сначала патч, потом копирование
           patch -p1 < susfs_patches/kernel_patches/50_add_susfs_in_gki_android13_5.15.patch || true
           cp -r susfs_patches/kernel_patches/fs/* ./fs/
           cp -r susfs_patches/kernel_patches/include/linux/* ./include/linux/
           cd drivers/kernelsu && patch -p1 < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+          echo "KSU_SRC_PATH=$(pwd)/drivers/kernelsu" >> $GITHUB_ENV
 
-      - name: 7. Конфигурация (Vendor Path Fix)
+      - name: 5. Конфигурация (Vendor Defconfig)
         run: |
-          # Поиск в vendor/ для ветки bsp
-          DEFCONFIG=$(find arch/arm64/configs -name "vermeer_defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
-          [ -z "$DEFCONFIG" ] && DEFCONFIG="vendor/kalama_defconfig" # Fallback на платформу kalama
-          
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG
-          scripts/config -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE
-          scripts/config -e CONFIG_KALLSYMS_ALL -e CONFIG_KPROBES -e CONFIG_DEBUG_INFO_BTF
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 vendor/vermeer_defconfig # Жесткий путь к конфигу
+          scripts/config -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE -e CONFIG_DEBUG_INFO_BTF
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-      - name: 8. Компиляция
+      - name: 6. Компиляция
         run: |
-          make -j$(nproc --all) \
-            ARCH=arm64 \
-            LLVM=1 LLVM_IAS=1 CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            KSU_SRC=$KSU_SRC_PATH
+          make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- KSU_SRC=$KSU_SRC_PATH
 
-      - name: 9. AnyKernel3 (Image.gz Only Fix)
+      - name: 7. AnyKernel3 (БРОНЕБОЙНЫЙ ФИКС РАЗДЕЛА)
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
           cd AnyKernel3
           sed -i "s/device.name1=.*/device.name1=vermeer/" anykernel.sh
           sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
-          sed -i 's|block=.*|block=/dev/block/by-name/init_boot|' anykernel.sh # Цель init_boot
+          # ЗАМЕНА ПУТИ НА INIT_BOOT (Критично для Vermeer)
+          sed -i 's|block=.*|block=/dev/block/by-name/init_boot;|' anykernel.sh
           
-          # Копируем только Image.gz, чтобы влезть в 32МБ
-          cp ../arch/arm64/boot/Image.gz ./
-          # Поиск DTB kalama в vendor
-          find ../arch/arm64/boot/dts/vendor/qcom -name "*kalama*.dtb" -exec cp {} ./dtb \;
-          zip -r9 ../Gadzhi-Vermeer-Final.zip *
+          cp ../arch/arm64/boot/Image.gz ./ # Только Image.gz для лимита 32МБ
+          find ../arch/arm64/boot/dts/vendor/qcom -name "*kalama*.dtb" -exec cp {} ./dtb \; # Драйверы дисплея
+          zip -r9 ../Gadzhi-Vermeer-V10.zip *
 
-      - name: 10. Artifact
+      - name: 8. Загрузка
         uses: actions/upload-artifact@v4
         with:
-          name: Gadzhi-Vermeer-Final
-          path: Gadzhi-Vermeer-Final.zip
-          
+          name: Gadzhi-Vermeer-V10
+          path: Gadzhi-Vermeer-V10.zip
