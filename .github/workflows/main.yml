@@ -31,62 +31,56 @@ jobs:
           echo "KBUILD_BUILD_HOST=GitHub_Actions" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
 
-      - name: 5. Загрузка ReSukiSU (Нативный метод Checkout)
+      - name: 5. Загрузка ReSukiSU
         uses: actions/checkout@v4
         with:
           repository: ReSukiSU/ReSukiSU
-          path: ksutmp # Качаем во временную папку через официальный канал
+          path: ksutmp
 
-      - name: 6. Интеграция ReSukiSU в дерево ядра
+      - name: 6. Регистрация ReSukiSU и обход защиты Kbuild
         run: |
-          # Создаем папку драйверов и копируем файлы
           mkdir -p drivers/kernelsu
           cp -r ksutmp/kernel/* drivers/kernelsu/
           
-          # Прописываем компиляцию в Makefile
+          # Прописываем в Makefile
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo "obj-y += kernelsu/" >> drivers/Makefile
           fi
           
-          # Регистрируем Kconfig
+          # Прописываем в Kconfig
           if ! grep -q "kernelsu" drivers/Kconfig; then
             sed -i '$i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           fi
-          echo "✅ ReSukiSU вшит в драйверы"
+          
+          # ФИНТ: Указываем абсолютный путь, чтобы Kbuild не ругался на отсутствие субмодуля
+          echo "KSU_SRC=$(pwd)/drivers/kernelsu" >> $GITHUB_ENV
+          echo "✅ Путь KSU_SRC установлен: $(pwd)/drivers/kernelsu"
 
-      - name: 7. Интеграция патчей SUSFS v2.10 (База GKI 5.15)
+      - name: 7. Интеграция патчей SUSFS v2.10
         run: |
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
-          
-          # Перенос файлов патчей
           cp -r susfs_patches/kernel_patches/fs/* ./fs/
           cp -r susfs_patches/kernel_patches/include/linux/* ./include/linux/
           
-          # Накладываем основной патч ядра
           SUSFS_PATCH=$(ls susfs_patches/kernel_patches/50_add_susfs_in_*.patch | head -n 1)
-          if [ -f "$SUSFS_PATCH" ]; then
-            patch -p1 --forward < "$SUSFS_PATCH" || echo "Патч ядра уже наложен"
-          fi
+          [ -f "$SUSFS_PATCH" ] && patch -p1 --forward < "$SUSFS_PATCH" || echo "Патч ядра уже наложен"
           
-          # Накладываем патч на KernelSU (ReSukiSU)
           KSU_PATCH=$(ls susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch | head -n 1)
           if [ -f "$KSU_PATCH" ]; then
             cd drivers/kernelsu
-            patch -p1 --forward < "../../$KSU_PATCH" || echo "Патч для KSU применен"
+            patch -p1 --forward < "../../$KSU_PATCH" || echo "Патч KSU применен"
             cd ../..
           fi
 
-      - name: 8. Конфигурация ядра (Poco F6 Pro / vermeer)
+      - name: 8. Конфигурация ядра (vermeer / GKI)
         run: |
           chmod +x scripts/config || true
-          
-          # Поиск дефконфига
           DEFCONFIG=$(find arch/arm64/configs -name "*vermeer*" | grep "defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
           [ -z "$DEFCONFIG" ] && DEFCONFIG="gki_defconfig"
           
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG
 
-          # --- ВКЛЮЧАЕМ ФУНКЦИИ ---
+          # Включаем нужные опции
           scripts/config -e KSU
           scripts/config -e KSU_SUSFS
           scripts/config -e KSU_SUSFS_SUS_PATH
@@ -97,15 +91,15 @@ jobs:
           scripts/config -e NET_SCH_FQ_CODEL
           scripts/config -e HZ_1000
           scripts/config --set-val HZ 1000
-          scripts/config -e ZRAM
-          scripts/config -e CRYPTO_ZSTD
-          scripts/config -e ZRAM_DEF_COMP_ZSTD
+          scripts/config -e CONFIG_KALLSYMS_ALL
+          scripts/config -e CONFIG_KPROBES
           
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
       - name: 9. Компиляция Ядра (Vermeer)
         run: |
-          make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1
+          # Передаем KSU_SRC прямо в команду make для гарантии
+          make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 KSU_SRC=$(pwd)/drivers/kernelsu
 
       - name: 10. Упаковка в AnyKernel3
         run: |
@@ -114,11 +108,8 @@ jobs:
           sed -i 's/kernel.string=.*/kernel.string=Ultimate-Gadzhi-Kernel-F6Pro/g' anykernel.sh
           sed -i 's/device.name1=.*/device.name1=vermeer/g' anykernel.sh
           
-          if [ -f "../arch/arm64/boot/Image" ]; then
-            cp "../arch/arm64/boot/Image" ./
-          elif [ -f "../arch/arm64/boot/Image.gz" ]; then
-            cp "../arch/arm64/boot/Image.gz" ./
-          fi
+          [ -f "../arch/arm64/boot/Image" ] && cp "../arch/arm64/boot/Image" ./
+          [ -f "../arch/arm64/boot/Image.gz" ] && cp "../arch/arm64/boot/Image.gz" ./
           
           zip -r9 ../Ultimate-Gadzhi-Kernel-F6Pro.zip *
 
