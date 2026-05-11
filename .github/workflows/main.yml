@@ -1,185 +1,49 @@
-name: Build Kernel - POCO F6 Pro (Vermeer) для Lunaris 3.10
+name: Сборка ULTIMATE Vermeer (Audited & Fixed v2)
 
 on:
   workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Ветка MiCode (auto = автопоиск)'
-        required: true
-        default: 'auto'
-      susfs_branch:
-        description: 'Ветка SUSFS (auto = автопоиск под версию ядра)'
-        required: true
-        default: 'auto'
-      android_version:
-        description: 'Версия Android (для автопоиска): 13, 14, 15'
-        required: true
-        default: '14'
 
 jobs:
   build:
-    name: Compile (SM8550 / Vermeer / POCO F6 Pro)
+    name: Компиляция (SM8550 / Vermeer)
     runs-on: ubuntu-22.04
     env:
-      KBUILD_BUILD_USER: "gadzhi"
-      KBUILD_BUILD_HOST: "github-actions"
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: "5G"
+      KBUILD_BUILD_USER: "gadzhi"
+      KBUILD_BUILD_HOST: "github-actions"
 
     steps:
       # ───────────────────────────────────────────────
-      - name: 1. Установка зависимостей
+      - name: 1. Зависимости
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential cpio curl flex git gnupg gperf \
             libssl-dev libxml2-utils zip zstd python3 \
             dwarves libelf-dev ccache \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             device-tree-compiler
+          echo "✅ Окружение готово"
 
       # ───────────────────────────────────────────────
-      - name: 2. Диагностика доступных веток MiCode
-        run: |
-          echo "════════════════════════════════════════════"
-          echo "📋 ВСЕ ВЕТКИ С 'vermeer':"
-          echo "════════════════════════════════════════════"
-          git ls-remote --heads https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git \
-            | grep -i vermeer | awk '{print $2}' | sed 's|refs/heads/||' || echo "Не найдено"
-          
-          echo ""
-          echo "════════════════════════════════════════════"
-          echo "📋 ВСЕ ВЕТКИ С 'kalama':"
-          echo "════════════════════════════════════════════"
-          git ls-remote --heads https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git \
-            | grep -i kalama | awk '{print $2}' | sed 's|refs/heads/||' || echo "Не найдено"
+      - name: 2. Загрузка исходников ядра в подпапку kernel/
+        uses: actions/checkout@v4
+        with:
+          repository: MiCode/Xiaomi_Kernel_OpenSource
+          ref: bsp-vermeer-t-oss
+          fetch-depth: 1
+          path: kernel
 
       # ───────────────────────────────────────────────
-      - name: 3. Автопоиск рабочей ветки
-        id: find_branch
-        run: |
-          set -e
-          
-          ANDROID_VER="${{ github.event.inputs.android_version }}"
-          MANUAL_BRANCH="${{ github.event.inputs.branch }}"
-          REPO="https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git"
-          
-          # Соответствие версии Android → буква
-          case "$ANDROID_VER" in
-            13) LETTER="t" ;;
-            14) LETTER="u" ;;
-            15) LETTER="v" ;;
-            *)  LETTER="u" ;;
-          esac
-          
-          if [ "$MANUAL_BRANCH" != "auto" ]; then
-            echo "🎯 Используем ручную ветку: $MANUAL_BRANCH"
-            FOUND_BRANCH="$MANUAL_BRANCH"
-          else
-            # Список кандидатов в порядке приоритета
-            CANDIDATES=(
-              "vermeer-${LETTER}-oss"
-              "bsp-vermeer-${LETTER}-oss"
-              "kalama-${LETTER}-oss"
-              "bsp-kalama-${LETTER}-oss"
-              "vermeer-${LETTER}-q-oss"
-              "bsp-vermeer-${LETTER}-q-oss"
-            )
-            
-            FOUND_BRANCH=""
-            for branch in "${CANDIDATES[@]}"; do
-              echo "🔍 Проверяю: $branch"
-              if git ls-remote --exit-code --heads "$REPO" "$branch" >/dev/null 2>&1; then
-                echo "✅ Найдена ветка: $branch"
-                FOUND_BRANCH="$branch"
-                break
-              fi
-            done
-            
-            if [ -z "$FOUND_BRANCH" ]; then
-              echo "❌ Ни одна из стандартных веток не найдена!"
-              echo "Доступные vermeer-ветки:"
-              git ls-remote --heads "$REPO" | grep -i vermeer | awk '{print $2}' | sed 's|refs/heads/||'
-              echo ""
-              echo "💡 Запусти workflow снова, указав ветку вручную в поле 'branch'"
-              exit 1
-            fi
-          fi
-          
-          echo "BRANCH=$FOUND_BRANCH" >> $GITHUB_OUTPUT
-          echo "ANDROID_LETTER=$LETTER" >> $GITHUB_OUTPUT
-
-      # ───────────────────────────────────────────────
-      - name: 4. Клонирование исходников ядра
-        run: |
-          set -e
-          BRANCH="${{ steps.find_branch.outputs.BRANCH }}"
-          echo "📥 Клонирую ветку: $BRANCH"
-          
-          git clone --depth=1 \
-            --branch "$BRANCH" \
-            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git \
-            kernel
-          
-          cd kernel
-          echo "✅ Клонирование завершено"
-          echo "=== Версия ядра ==="
-          head -5 Makefile
-
-      # ───────────────────────────────────────────────
-      - name: 5. Определение версии ядра и автоподбор SUSFS ветки
-        id: detect_kernel
-        working-directory: kernel
-        run: |
-          VERSION=$(grep -E "^VERSION = " Makefile | awk '{print $3}')
-          PATCHLEVEL=$(grep -E "^PATCHLEVEL = " Makefile | awk '{print $3}')
-          KERNEL_VER="${VERSION}.${PATCHLEVEL}"
-          echo "🔧 Версия ядра: $KERNEL_VER"
-          echo "KERNEL_VER=$KERNEL_VER" >> $GITHUB_OUTPUT
-          
-          SUSFS_INPUT="${{ github.event.inputs.susfs_branch }}"
-          LETTER="${{ steps.find_branch.outputs.ANDROID_LETTER }}"
-          ANDROID_VER="${{ github.event.inputs.android_version }}"
-          
-          if [ "$SUSFS_INPUT" != "auto" ]; then
-            SUSFS_BRANCH="$SUSFS_INPUT"
-          else
-            SUSFS_BRANCH="gki-android${ANDROID_VER}-${KERNEL_VER}"
-          fi
-          
-          echo "🎯 SUSFS ветка: $SUSFS_BRANCH"
-          
-          # Проверка существования ветки SUSFS
-          if ! git ls-remote --exit-code --heads \
-               https://gitlab.com/simonpunk/susfs4ksu.git "$SUSFS_BRANCH" >/dev/null 2>&1; then
-            echo "⚠️ Ветка $SUSFS_BRANCH не найдена. Доступные:"
-            git ls-remote --heads https://gitlab.com/simonpunk/susfs4ksu.git \
-              | awk '{print $2}' | sed 's|refs/heads/||'
-            exit 1
-          fi
-          
-          echo "SUSFS_BRANCH=$SUSFS_BRANCH" >> $GITHUB_OUTPUT
-
-      # ───────────────────────────────────────────────
-      - name: 6. Проверка структуры репозитория
-        working-directory: kernel
-        run: |
-          echo "=== Все defconfig'и ==="
-          find arch/arm64/configs -type f | sort
-          echo ""
-          echo "=== Структура drivers/ ==="
-          ls drivers/ | head -30
-
-      # ───────────────────────────────────────────────
-      - name: 7. Кэширование Clang
+      - name: 3. Кэш Clang 17.0.6
         id: clang-cache
         uses: actions/cache@v4
         with:
-          path: clang
-          key: clang-17.0.6-ubuntu22
+          path: ${{ github.workspace }}/clang
+          key: clang-17-0-6-ubuntu22
 
-      - name: 8. Установка Clang 17.0.6
+      - name: 4. Установка Clang (если нет в кэше)
         if: steps.clang-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p $GITHUB_WORKSPACE/clang
@@ -189,44 +53,47 @@ jobs:
           tar -xJf clang.tar.xz --strip-components=1
           rm clang.tar.xz
 
-      - name: 9. Добавление Clang в PATH
+      - name: 5. Добавление Clang в PATH
         run: |
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
           $GITHUB_WORKSPACE/clang/bin/clang --version
 
       # ───────────────────────────────────────────────
-      - name: 10. ccache
+      - name: 6. Кэш ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-vermeer-${{ github.run_id }}
-          restore-keys: |
-            ccache-vermeer-
+          restore-keys: ccache-vermeer-
 
       # ───────────────────────────────────────────────
-      - name: 11. Интеграция ReSukiSU (KernelSU)
+      - name: 7. Интеграция ReSukiSU (KernelSU)
         working-directory: kernel
         run: |
           set -e
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ../ksutmp
           
           if [ ! -d ../ksutmp/kernel ]; then
-            echo "❌ ReSukiSU: папка kernel не найдена!"
-            ls ../ksutmp
+            echo "❌ ReSukiSU: папка 'kernel' не найдена в репозитории"
+            ls -la ../ksutmp
             exit 1
           fi
           
           mkdir -p drivers/kernelsu
           cp -af ../ksutmp/kernel/. drivers/kernelsu/
           
+          # Точечный фикс: убираем только setlocalversion проверку из Kbuild
           if [ -f drivers/kernelsu/Kbuild ]; then
-            sed -i '/git/,+4d' drivers/kernelsu/Kbuild || true
+            sed -i '/getKernelSUVersion/,/endif/d' drivers/kernelsu/Kbuild 2>/dev/null || true
+            sed -i '/setlocalversion/d' drivers/kernelsu/Kbuild 2>/dev/null || true
           fi
           
+          # Регистрация в драйверах
           if ! grep -q "kernelsu" drivers/Makefile; then
             echo "obj-y += kernelsu/" >> drivers/Makefile
           fi
           
+          # Регистрация в Kconfig (перед endmenu)
           if ! grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
             sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           fi
@@ -235,103 +102,79 @@ jobs:
           echo "✅ KernelSU интегрирован"
 
       # ───────────────────────────────────────────────
-      - name: 12. Применение SUSFS патчей
+      - name: 8. Интеграция SUSFS (правильный порядок)
         working-directory: kernel
         run: |
           set -e
-          SUSFS_BRANCH="${{ steps.detect_kernel.outputs.SUSFS_BRANCH }}"
-          
           git clone --depth=1 \
             https://gitlab.com/simonpunk/susfs4ksu.git \
-            -b "$SUSFS_BRANCH" \
+            -b gki-android13-5.15 \
             ../susfs_patches
           
-          PATCH=$(ls ../susfs_patches/kernel_patches/50_add_susfs_in_*.patch 2>/dev/null | head -1)
-          if [ -z "$PATCH" ]; then
+          # Шаг А: копируем новые файлы (fs/susfs.c, include/linux/susfs.h и т.д.)
+          if [ -d ../susfs_patches/kernel_patches/fs ]; then
+            cp -r ../susfs_patches/kernel_patches/fs/* ./fs/ 2>/dev/null || true
+          fi
+          if [ -d ../susfs_patches/kernel_patches/include/linux ]; then
+            cp -r ../susfs_patches/kernel_patches/include/linux/* ./include/linux/ 2>/dev/null || true
+          fi
+          
+          # Шаг Б: применяем патч к существующим файлам
+          PATCH=$(ls ../susfs_patches/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch \
+                     ../susfs_patches/kernel_patches/50_add_susfs_in_gki_android13_5.15.patch \
+                     2>/dev/null | head -1)
+          if [ -n "$PATCH" ]; then
+            echo "📦 Применяем: $PATCH"
+            patch -p1 < "$PATCH" || echo "⚠️ Некоторые hunks не применились (см. *.rej)"
+          else
             echo "❌ SUSFS патч не найден!"
             ls ../susfs_patches/kernel_patches/
             exit 1
           fi
           
-          echo "📦 Применяем: $PATCH"
-          if ! patch -p1 < "$PATCH"; then
-            echo "⚠️ Часть SUSFS патча не применилась — .rej файлы:"
-            find . -name "*.rej" 2>/dev/null
-          fi
-          
-          cp -r ../susfs_patches/kernel_patches/fs/* ./fs/ 2>/dev/null || true
-          cp -r ../susfs_patches/kernel_patches/include/linux/* ./include/linux/ 2>/dev/null || true
-          
+          # Шаг В: патч KernelSU для поддержки SUSFS
           KSU_PATCH="../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
           if [ -f "$KSU_PATCH" ]; then
-            cd drivers/kernelsu
-            patch -p1 < "../../$KSU_PATCH" || echo "⚠️ KSU SUSFS patch неполный"
-            cd ../..
+            ( cd drivers/kernelsu && patch -p1 < "../../$KSU_PATCH" ) \
+              || echo "⚠️ KSU патч неполный (возможно, уже встроен)"
           fi
           
-          if [ -d fs/susfs ] || [ -f fs/susfs.c ]; then
+          # Проверка
+          if [ -f fs/susfs.c ] || [ -d fs/susfs ]; then
             echo "✅ SUSFS файлы на месте"
           else
-            echo "⚠️ SUSFS файлы не найдены — проверь структуру"
-            ls fs/ | grep -i sus || true
+            echo "⚠️ SUSFS файлы не обнаружены"
           fi
 
       # ───────────────────────────────────────────────
-      - name: 13. Автофикс битых ссылок Kconfig
+      - name: 9. Конфигурация ядра
         working-directory: kernel
         run: |
           set -e
           
-          fix_kconfig() {
-            local file=$1
-            [ ! -f "$file" ] && return
-            grep -nP '^\s*source\s+"' "$file" 2>/dev/null | while IFS=: read -r line _; do
-              path=$(sed -n "${line}p" "$file" | grep -oP 'source\s+"\K[^"]+')
-              [ -z "$path" ] && continue
-              if echo "$path" | grep -q '\$'; then continue; fi
-              if [ ! -f "$path" ]; then
-                echo "❌ Битая ссылка $file:$line → $path"
-                sed -i "${line}s|^|# BROKEN: |" "$file"
-              fi
-            done
-          }
-          
-          fix_kconfig drivers/misc/Kconfig
-          fix_kconfig drivers/Kconfig
-          
-          if [ -f fs/susfs/Kconfig ] && ! grep -q "susfs/Kconfig" fs/Kconfig; then
-            echo 'source "fs/susfs/Kconfig"' >> fs/Kconfig
-          fi
-          
-          echo "✅ Kconfig обработан"
-
-      # ───────────────────────────────────────────────
-      - name: 14. Конфигурация ядра
-        working-directory: kernel
-        run: |
-          set -e
-          
-          CONF_PATH=$(find arch/arm64/configs -name "vermeer_defconfig" 2>/dev/null | head -1)
-          [ -z "$CONF_PATH" ] && CONF_PATH=$(find arch/arm64/configs -name "*vermeer*" -type f 2>/dev/null | head -1)
-          [ -z "$CONF_PATH" ] && CONF_PATH=$(find arch/arm64/configs -name "kalama_GKI.config" 2>/dev/null | head -1)
-          [ -z "$CONF_PATH" ] && CONF_PATH=$(find arch/arm64/configs -name "*kalama*defconfig*" 2>/dev/null | head -1)
+          # Многоуровневый поиск defconfig
+          CONF_PATH=""
+          for name in vermeer_defconfig vendor/vermeer_defconfig \
+                      kalama_defconfig vendor/kalama_defconfig \
+                      vendor/kalama_GKI.config gki_defconfig; do
+            if [ -f "arch/arm64/configs/$name" ]; then
+              CONF_PATH="arch/arm64/configs/$name"
+              DEFCONFIG="$name"
+              break
+            fi
+          done
           
           if [ -z "$CONF_PATH" ]; then
-            echo "❌ Defconfig не найден!"
+            echo "❌ Defconfig не найден! Доступные:"
             find arch/arm64/configs -type f
             exit 1
           fi
           
-          DEFCONFIG=$(basename "$CONF_PATH")
-          REL_PATH=${CONF_PATH#arch/arm64/configs/}
-          echo "🚀 Используем: $REL_PATH"
+          echo "🚀 Используем: $DEFCONFIG"
           
-          if [ "$REL_PATH" != "$DEFCONFIG" ]; then
-            cp "$CONF_PATH" "arch/arm64/configs/$DEFCONFIG"
-          fi
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out "$DEFCONFIG"
           
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out $DEFCONFIG
-          
+          # Включаем KSU + SUSFS (БЕЗ префикса CONFIG_)
           ./scripts/config --file out/.config \
             -e KSU \
             -e KSU_SUSFS \
@@ -344,17 +187,17 @@ jobs:
             -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
             -e KSU_SUSFS_OPEN_REDIRECT \
             -e KSU_SUSFS_ENABLE_LOG \
-            -e DEBUG_INFO_BTF \
-            -d LTO_CLANG_FULL \
-            -e LTO_CLANG_THIN
+            -e KALLSYMS_ALL \
+            -e KPROBES \
+            -e DEBUG_INFO_BTF
           
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
           
-          echo "=== KSU/SUSFS финальные настройки ==="
-          grep -E "KSU|SUSFS" out/.config || true
+          echo "=== KSU/SUSFS финальные значения ==="
+          grep -E "^CONFIG_(KSU|SUSFS)" out/.config || echo "⚠️ Опции не активны"
 
       # ───────────────────────────────────────────────
-      - name: 15. Компиляция ядра
+      - name: 10. Компиляция ядра
         working-directory: kernel
         run: |
           set -e
@@ -365,24 +208,26 @@ jobs:
             O=out \
             LLVM=1 LLVM_IAS=1 \
             CC="ccache clang" \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             KSU_SRC=$KSU_SRC_PATH \
             2>&1 | tee build.log
           
           echo ""
-          echo "=== Артефакты ==="
+          echo "=== Артефакты сборки ==="
           ls -la out/arch/arm64/boot/ || true
+          
+          ccache -s
 
       # ───────────────────────────────────────────────
-      - name: 16. Сборка AnyKernel3 ZIP
-        working-directory: kernel
+      - name: 11. Сборка AnyKernel3 ZIP
         run: |
           set -e
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ../AnyKernel3
-          cd ../AnyKernel3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          cd AnyKernel3
           
-          sed -i 's|kernel.string=.*|kernel.string=Gadzhi-Vermeer для POCO F6 Pro|' anykernel.sh
+          # Настройка под Vermeer
+          sed -i 's|kernel.string=.*|kernel.string=Gadzhi-Vermeer ULTIMATE|' anykernel.sh
           sed -i 's|do.devicecheck=.*|do.devicecheck=1|' anykernel.sh
           sed -i 's|device.name1=.*|device.name1=vermeer|' anykernel.sh
           sed -i 's|device.name2=.*|device.name2=Vermeer|' anykernel.sh
@@ -393,42 +238,50 @@ jobs:
           sed -i 's|is_slot_device=.*|is_slot_device=1|' anykernel.sh
           sed -i 's|block=.*|block=/dev/block/by-name/init_boot|' anykernel.sh
           
-          if [ -f ../kernel/out/arch/arm64/boot/Image ]; then
-            cp ../kernel/out/arch/arm64/boot/Image ./
-            echo "✅ Image скопирован"
-          elif [ -f ../kernel/out/arch/arm64/boot/Image.gz ]; then
-            cp ../kernel/out/arch/arm64/boot/Image.gz ./
-            echo "⚠️ Image.gz (Image не найден)"
+          # Копируем ядро (приоритет Image.gz для экономии места, fallback на Image)
+          BOOT_DIR="../kernel/out/arch/arm64/boot"
+          if [ -f "$BOOT_DIR/Image.gz" ]; then
+            cp "$BOOT_DIR/Image.gz" ./
+            echo "✅ Скопирован Image.gz ($(du -h Image.gz | cut -f1))"
+          elif [ -f "$BOOT_DIR/Image" ]; then
+            cp "$BOOT_DIR/Image" ./
+            echo "✅ Скопирован Image ($(du -h Image | cut -f1))"
           else
-            echo "❌ Ядро не собрано!"
-            ls ../kernel/out/arch/arm64/boot/
+            echo "❌ Ядро не найдено!"
+            ls "$BOOT_DIR"
             exit 1
           fi
           
-          DTB_DIR=../kernel/out/arch/arm64/boot/dts/vendor/qcom
+          # Склейка DTB через cat (НЕ перезапись!)
+          DTB_DIR="$BOOT_DIR/dts/vendor/qcom"
           if [ -d "$DTB_DIR" ]; then
             DTBS=$(find "$DTB_DIR" -name "*kalama*.dtb" 2>/dev/null)
             if [ -n "$DTBS" ]; then
-              cat $DTBS > dtb
-              echo "✅ DTB склеен"
+              > dtb  # очистка
+              for f in $DTBS; do
+                cat "$f" >> dtb
+              done
+              echo "✅ DTB склеен: $(du -h dtb | cut -f1)"
+            else
+              echo "⚠️ DTB файлы kalama не найдены"
             fi
           fi
           
           DATE=$(date +%Y%m%d-%H%M)
-          ZIP_NAME="Gadzhi-Vermeer-Lunaris-${DATE}.zip"
+          ZIP_NAME="Gadzhi-Vermeer-Final-${DATE}.zip"
           zip -r9 "../$ZIP_NAME" * -x .git README.md *placeholder
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          echo "✅ Создан: $ZIP_NAME"
+          echo "✅ Создан: $ZIP_NAME ($(du -h "../$ZIP_NAME" | cut -f1))"
 
       # ───────────────────────────────────────────────
-      - name: 17. Загрузка ZIP
+      - name: 12. Загрузка ZIP
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
           path: ${{ env.ZIP_NAME }}
           if-no-files-found: error
 
-      - name: 18. Загрузка build.log
+      - name: 13. Загрузка build.log (всегда)
         if: always()
         uses: actions/upload-artifact@v4
         with:
