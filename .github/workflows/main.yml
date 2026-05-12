@@ -1,4 +1,4 @@
-name: ULTIMATE Vermeer Kernel (Lunaris 3.10)
+name: ULTIMATE Vermeer Kernel (GKI 2.0 Certified)
 
 on:
   workflow_dispatch:
@@ -11,9 +11,9 @@ jobs:
       - name: 1. Системные зависимости
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev ccache rsync device-tree-compiler lld llvm
+          sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev ccache rsync device-tree-compiler lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-      - name: 2. Загрузка исходников Xiaomi (Vermeer T-OSS)
+      - name: 2. Загрузка исходников (Vermeer T-OSS)
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
@@ -29,10 +29,10 @@ jobs:
           tar -xJf *.tar.xz --strip-components=1
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
 
-      - name: 4. Интеграция ReSukiSU + SUSFS (Правильный порядок)
+      - name: 4. Интеграция ReSukiSU + SUSFS
         working-directory: kernel
         run: |
-          # KernelSU
+          # Внедрение KSU
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
           mkdir -p drivers/kernelsu
           cp -af ksutmp/kernel/. drivers/kernelsu/
@@ -40,75 +40,68 @@ jobs:
           echo "obj-y += kernelsu/" >> drivers/Makefile
           sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           
-          # SUSFS (Патч -> Копирование)
+          # Патчинг SUSFS
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
           patch -p1 < susfs_patches/kernel_patches/50_add_susfs_in_*.patch || true
           cp -r susfs_patches/kernel_patches/fs/* ./fs/
           cp -r susfs_patches/kernel_patches/include/linux/* ./include/linux/
           cd drivers/kernelsu && patch -p1 < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
-          echo "KSU_SRC_PATH=$(pwd)/drivers/kernelsu" >> $GITHUB_ENV
 
-      - name: 5. ХИРУРГИЧЕСКИЙ ФИКС Xiaomi (Удаление битых ссылок)
+      - name: 5. Хирургический фикс исходников Xiaomi
         working-directory: kernel
         run: |
-          # Жесткое удаление битой ссылки hwid/Kconfig
           sed -i '/hwid\/Kconfig/d' drivers/misc/Kconfig
-          # Зачистка дублей и правильное подключение SUSFS
           sed -i '/susfs/d' fs/Kconfig
           echo 'source "fs/susfs/Kconfig"' >> fs/Kconfig
-          echo "✅ Битые ссылки MiCode зачищены."
 
-      - name: 6. Поиск и настройка Defconfig
-        id: cfg
+      - name: 6. Поиск конфига и генерация .config
         working-directory: kernel
         run: |
-          CONF_PATH=$(find arch/arm64/configs -name "*vermeer*defconfig*" | head -n 1)
-          [ -z "$CONF_PATH" ] && CONF_PATH=$(find arch/arm64/configs -name "*kalama*defconfig*" | head -n 1)
-          DEFCONFIG=$(echo "$CONF_PATH" | sed 's|arch/arm64/configs/||')
-          echo "🚀 Нашёлся конфиг: $DEFCONFIG"
-          echo "DEFCONFIG=$DEFCONFIG" >> $GITHUB_OUTPUT
-
-      - name: 7. Генерация .config (С флагами маскировки)
-        working-directory: kernel
-        run: |
-          DEFCONFIG="${{ steps.cfg.outputs.DEFCONFIG }}"
-          # Создаем базовый конфиг в папке out/
+          DEF_FILE=$(find arch/arm64/configs -type f -name "*vermeer*defconfig*" | head -n 1)
+          [ -z "$DEF_FILE" ] && DEF_FILE=$(find arch/arm64/configs -type f -name "*kalama*defconfig*" | head -n 1)
+          [ -z "$DEF_FILE" ] && DEF_FILE="arch/arm64/configs/gki_defconfig"
+          
+          DEFCONFIG=$(echo "$DEF_FILE" | sed 's|arch/arm64/configs/||')
+          echo "🚀 Выбран конфиг: $DEFCONFIG"
+          
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 "$DEFCONFIG"
-          # Внедряем KSU, SUSFS и Spoofing
-          ./scripts/config --file out/.config -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE -e CONFIG_DEBUG_INFO_BTF -e KALLSYMS_ALL -e KPROBES
-          # Применяем изменения
+          
+          # Накатываем маскировку и турбо-твики (Исправлен флаг BTF)
+          ./scripts/config --file out/.config \
+            -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE \
+            -e DEBUG_INFO_BTF -e KALLSYMS_ALL -e KPROBES \
+            -e TCP_CONG_BBR --set-str DEFAULT_TCP_CONG bbr -e NET_SCH_FQ_CODEL \
+            -e LRU_GEN -e LRU_GEN_ENABLED -e MQ_IOSCHED_KYBER
+          
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-      - name: 8. КОМПИЛЯЦИЯ ЯДРА
+      - name: 7. КОМПИЛЯЦИЯ
         working-directory: kernel
         run: |
-          # ВАЖНО: O=out гарантирует сборку из нашего модифицированного конфига
-          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="clang" LD="ld.lld" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- KSU_SRC=$KSU_SRC_PATH
+          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="clang" LD="ld.lld" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- KSU_SRC=$(pwd)/drivers/kernelsu
 
-      - name: 9. Упаковка в AnyKernel3 (init_boot + Конкатенация DTB)
+      - name: 8. AnyKernel3 (Чистая упаковка GKI в BOOT)
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
           cd ak3
           sed -i "s/device.name1=.*/device.name1=vermeer/" anykernel.sh
           sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
-          sed -i 's|block=.*|block=/dev/block/by-name/init_boot|' anykernel.sh
           
-          # Копируем само ядро
-          cp ../kernel/out/arch/arm64/boot/Image.gz ./
+          # ПРАВИЛЬНЫЙ РАЗДЕЛ ДЛЯ ЯДРА (BOOT, НЕ INIT_BOOT!)
+          sed -i 's|^block=.*|block=auto;|' anykernel.sh
           
-          # Склеиваем все драйверы дисплея в один файл dtb
-          if [ -d "../kernel/out/arch/arm64/boot/dts/vendor/qcom" ]; then
-            DTB_FILES=$(find ../kernel/out/arch/arm64/boot/dts/vendor/qcom -name "*kalama*.dtb" -o -name "*vermeer*.dtb")
-            if [ -n "$DTB_FILES" ]; then
-              cat $DTB_FILES > ./dtb
-              echo "✅ Дисплейные драйверы (DTB) склеены и упакованы."
-            fi
+          # Для GKI ядер копируем только чистый Image
+          if [ -f ../kernel/out/arch/arm64/boot/Image ]; then
+            echo "📦 Найдено ядро, пакуем..."
+            cp ../kernel/out/arch/arm64/boot/Image ./
+          else
+            echo "❌ Файл ядра не найден!" && exit 1
           fi
           
-          zip -r9 ../Gadzhi-Vermeer-Lunaris.zip *
+          zip -r9 ../Gadzhi-Vermeer-Perfect.zip * -x .git README.md *placeholder
 
-      - name: 10. Загрузка Артефакта
+      - name: 9. Загрузка Артефакта
         uses: actions/upload-artifact@v4
         with:
-          name: Gadzhi-Vermeer-Lunaris
-          path: Gadzhi-Vermeer-Lunaris.zip
+          name: Gadzhi-Vermeer-Perfect
+          path: Gadzhi-Vermeer-Perfect.zip
