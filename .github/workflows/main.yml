@@ -1,4 +1,4 @@
-name: MONOLITH v24 (The Final Strike)
+name: ULTIMATE HYBRID — Gadzhi Kernel / Poco F6 Pro (Vermeer)
 
 on:
   workflow_dispatch:
@@ -7,13 +7,117 @@ jobs:
   build:
     name: SM8550 / POCO F6 Pro / Vermeer
     runs-on: ubuntu-22.04
-    steps:
-      - name: 1. Системные зависимости (Полный набор)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev ccache rsync device-tree-compiler lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+    timeout-minutes: 180   # Защита от вечного зависания
 
-      - name: 2. Загрузка MiCode (Vermeer OSS)
+    steps:
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 1 — Очистка диска
+      # (MiCode репо ~3GB + тулчейн ~500MB + сборка ~10GB = риск переполнения)
+      # ═══════════════════════════════════════════════════════════
+      - name: 1. Очистка диска
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+          df -h
+          echo "✅ Диск очищен"
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 2 — Зависимости
+      # ═══════════════════════════════════════════════════════════
+      - name: 2. Системные зависимости
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential cpio curl flex \
+            git gnupg gperf libssl-dev libxml2-utils \
+            zip zstd python3 python3-dev dwarves \
+            libelf-dev ccache rsync pahole pkg-make \
+            device-tree-compiler lld llvm \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi
+          echo "✅ Зависимости установлены"
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 3 — Кэш тулчейна (Gemini: пинованная версия)
+      # ═══════════════════════════════════════════════════════════
+      - name: 3. Кэш LLVM 17.0.6
+        id: clang-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/clang
+          key: llvm-17.0.6-ubuntu22-v1
+
+      - name: Установка LLVM 17.0.6 (если нет кэша)
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/clang
+          cd $GITHUB_WORKSPACE/clang
+          curl -L --retry 3 --retry-delay 5 \
+            https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz \
+            -o clang.tar.xz
+          tar -xJf clang.tar.xz --strip-components=1
+          rm clang.tar.xz
+          echo "✅ LLVM 17.0.6 установлен"
+
+      - name: Регистрация тулчейна в PATH
+        run: |
+          echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
+          ls $GITHUB_WORKSPACE/clang/bin | head -10
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 4 — Проверка тулчейна
+      # ═══════════════════════════════════════════════════════════
+      - name: 4. Проверка тулчейна
+        run: |
+          clang --version          || { echo "❌ clang не найден!";              exit 1; }
+          ld.lld --version         || { echo "❌ ld.lld не найден!";             exit 1; }
+          llvm-ar --version        || { echo "❌ llvm-ar не найден!";            exit 1; }
+          aarch64-linux-gnu-gcc --version || { echo "❌ cross-compiler не найден!"; exit 1; }
+          echo "✅ Тулчейн готов"
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 5 — Настройка ccache (моя версия: реально используется)
+      # ═══════════════════════════════════════════════════════════
+      - name: 5. Настройка ccache
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/.ccache
+          ccache --set-config=cache_dir=$GITHUB_WORKSPACE/.ccache
+          ccache --set-config=max_size=5G
+          ccache --set-config=compression=true
+          ccache --set-config=compiler_check=content
+          ccache -z
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> $GITHUB_ENV
+          echo "✅ ccache настроен"
+
+      - name: Кэш ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-vermeer-${{ github.sha }}
+          restore-keys: ccache-vermeer-
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 6 — Переменные окружения
+      # ═══════════════════════════════════════════════════════════
+      - name: 6. Переменные окружения
+        run: |
+          echo "ARCH=arm64"                               >> $GITHUB_ENV
+          echo "SUBARCH=arm64"                            >> $GITHUB_ENV
+          echo "KBUILD_BUILD_USER=Gadzhi"                 >> $GITHUB_ENV
+          echo "KBUILD_BUILD_HOST=GitHub_Actions"         >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-"         >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-"        >> $GITHUB_ENV
+          echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> $GITHUB_ENV
+          echo "LD=ld.lld"                                >> $GITHUB_ENV
+          echo "KSU_VERSION=11950"                        >> $GITHUB_ENV
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 7 — Исходники ядра MiCode (Gemini: правильный источник)
+      # ═══════════════════════════════════════════════════════════
+      - name: 7. Загрузка исходников (MiCode Vermeer OSS)
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
@@ -21,103 +125,481 @@ jobs:
           fetch-depth: 1
           path: kernel
 
-      - name: 3. Установка Clang 17.0.6
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/clang
-          cd $GITHUB_WORKSPACE/clang
-          curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-          tar -xJf *.tar.xz --strip-components=1
-          echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
-
-      - name: 4. Взлом защиты ReSukiSU + SUSFS
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 8 — Фикс сломанных Xiaomi драйверов (только у Gemini)
+      # Xiaomi убирает проприетарные драйверы перед публикацией
+      # ═══════════════════════════════════════════════════════════
+      - name: 8. Фикс сломанных Xiaomi драйверов
         working-directory: kernel
         run: |
-          # Клонируем KernelSU
-          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
-          mkdir -p drivers/kernelsu
-          cp -a ksutmp/kernel/* drivers/kernelsu/
-          
-          # ОБХОД ЗАЩИТЫ: Превращаем проверку git submodule в "пустышку"
-          # Это предотвращает остановку сборки из-за отсутствия .git в папке KSU
-          sed -i 's/ifneq ($(shell cd $(KSU_SRC); git rev-parse --is-inside-work-tree 2>\/dev\/null),true)/ifneq (true,true)/g' drivers/kernelsu/Kbuild
-          
-          # Прописываем KSU в систему сборки
-          grep -q "kernelsu" drivers/Makefile || echo "obj-y += kernelsu/" >> drivers/Makefile
-          grep -q "kernelsu" drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-          
-          # Интеграция SUSFS
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
-          patch -p1 -f < susfs_patches/kernel_patches/50_add_susfs_in_*.patch || true
-          cp -a susfs_patches/kernel_patches/fs/* fs/
-          cp -a susfs_patches/kernel_patches/include/linux/* include/linux/
-          cd drivers/kernelsu && patch -p1 -f < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
-
-      - name: 5. Фикс битых ссылок Xiaomi
-        working-directory: kernel
-        run: |
-          # Создаем фейковую папку драйверов (Xiaomi удалила их перед публикацией)
+          # Создаём заглушку для удалённых Xiaomi драйверов
           mkdir -p drivers/xiaomi
-          echo "obj-y += dummy.o" > drivers/xiaomi/Makefile
-          echo "int main() { return 0; }" > drivers/xiaomi/dummy.c
-          
-          # Удаляем битый Kconfig из misc
-          sed -i '/hwid\/Kconfig/d' drivers/misc/Kconfig || true
+          echo "obj-y += dummy.o"         > drivers/xiaomi/Makefile
+          printf '#include <linux/init.h>\nstatic int __init xiaomi_dummy_init(void) { return 0; }\nmodule_init(xiaomi_dummy_init);\n' \
+            > drivers/xiaomi/dummy.c
 
-      - name: 6. Конфигурация (Умный поиск Defconfig)
+          # Убираем битые ссылки на Kconfig
+          sed -i '/hwid\/Kconfig/d'       drivers/misc/Kconfig   || true
+          sed -i '/xiaomi\/Kconfig/d'     drivers/misc/Kconfig   || true
+
+          echo "✅ Xiaomi заглушки созданы"
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 9 — Интеграция ReSukiSU
+      # Gemini: хак обхода git submodule проверки
+      # Моя: cp -a ./ вместо /* (копирует скрытые файлы)
+      # ═══════════════════════════════════════════════════════════
+      - name: 9. Интеграция ReSukiSU
         working-directory: kernel
         run: |
-          # Динамический поиск файла конфига, если Xiaomi изменила структуру папок
-          CONF_FILE=$(find arch/arm64/configs -name "vermeer_defconfig" -o -name "kalama_defconfig" -o -name "gki_defconfig" | head -n 1)
-          
-          if [ -z "$CONF_FILE" ]; then
-            echo "❌ Конфиг не найден!" && exit 1
+          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp \
+            || { echo "❌ Не удалось клонировать ReSukiSU"; exit 1; }
+
+          echo "=== Структура ReSukiSU ==="
+          find ksutmp -maxdepth 3 -type f | head -40
+
+          if [ ! -d "ksutmp/kernel" ]; then
+            echo "❌ Папка ksutmp/kernel не найдена!"
+            ls -la ksutmp/
+            exit 1
           fi
-          
-          # Получаем относительный путь для команды make
-          DEF=$(echo $CONF_FILE | sed 's|arch/arm64/configs/||')
-          echo "🚀 Нашли и используем конфиг: $DEF"
-          
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 KSU_VERSION=11950 $DEF
-          
-          # Включаем маскировку и оптимизации
-          ./scripts/config --file out/.config \
-            -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE \
-            -e DEBUG_INFO_BTF -e KALLSYMS_ALL -e KPROBES \
-            -e TCP_CONG_BBR --set-str DEFAULT_TCP_CONG bbr
-          
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 KSU_VERSION=11950 olddefconfig
 
-      - name: 7. Компиляция Ядра
+          mkdir -p drivers/kernelsu
+          # /. копирует скрытые файлы в отличие от /*
+          cp -a ksutmp/kernel/. drivers/kernelsu/
+
+          if [ ! -f "drivers/kernelsu/Kconfig" ]; then
+            echo "❌ Kconfig не скопировался!"
+            ls -la drivers/kernelsu/
+            exit 1
+          fi
+
+          # Хак обхода git submodule проверки в Kbuild (от Gemini)
+          if [ -f "drivers/kernelsu/Kbuild" ]; then
+            sed -i 's/ifneq ($(shell cd $(KSU_SRC); git rev-parse --is-inside-work-tree 2>\/dev\/null),true)/ifneq (true,true)/g' \
+              drivers/kernelsu/Kbuild
+            echo "✅ Git submodule хак применён"
+          fi
+
+          # Прописываем в систему сборки
+          grep -q "kernelsu" drivers/Makefile || \
+            echo "obj-y += kernelsu/" >> drivers/Makefile
+
+          grep -q "kernelsu" drivers/Kconfig || \
+            sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          echo "✅ ReSukiSU интегрирован"
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 10 — Интеграция SUSFS
+      # ИСПРАВЛЕНО: сначала патч, потом копирование файлов
+      # (у Gemini порядок неверный — конфликт файлов)
+      # ═══════════════════════════════════════════════════════════
+      - name: 10. Интеграция SUSFS v2.10
         working-directory: kernel
         run: |
-          # Собираем с поддержкой GCC-Compat для vDSO
-          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-            CC="clang" LD="ld.lld" \
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git \
+            -b gki-android13-5.15 susfs_patches \
+            || { echo "❌ Не удалось клонировать SUSFS"; exit 1; }
+
+          # 1. Сначала патч ядра (он сам добавит файлы)
+          SUSFS_PATCH=$(ls susfs_patches/kernel_patches/50_add_susfs_in_*.patch 2>/dev/null | head -n 1)
+          if [ -f "$SUSFS_PATCH" ]; then
+            patch -p1 --forward < "$SUSFS_PATCH" 2>&1 | tee /tmp/susfs.log
+            if grep -q "FAILED\|can't find file\|malformed" /tmp/susfs.log; then
+              echo "❌ Патч ядра упал с ошибкой!"
+              cat /tmp/susfs.log
+              exit 1
+            fi
+            echo "✅ Патч ядра наложен"
+          else
+            echo "⚠️ Патч ядра не найден"
+          fi
+
+          # 2. Потом копирование файлов (не наоборот!)
+          cp -a susfs_patches/kernel_patches/fs/.           fs/
+          cp -a susfs_patches/kernel_patches/include/linux/. include/linux/
+
+          # 3. Патч KernelSU
+          KSU_PATCH="susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+          if [ -f "$KSU_PATCH" ]; then
+            cd drivers/kernelsu
+            patch -p1 --forward < "../../$KSU_PATCH" 2>&1 | tee /tmp/ksu.log
+            if grep -q "FAILED\|can't find file\|malformed" /tmp/ksu.log; then
+              echo "❌ Патч KSU упал с ошибкой!"
+              exit 1
+            fi
+            cd ../..
+            echo "✅ Патч KSU наложен"
+          fi
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 11 — Конфигурация ядра
+      # Gemini: O=out, --file out/.config, KSU_VERSION, умный поиск
+      # Моя: полный набор опций, правильные имена конфигов
+      # ═══════════════════════════════════════════════════════════
+      - name: 11. Конфигурация ядра
+        working-directory: kernel
+        run: |
+          # Общие флаги
+          MAKE_FLAGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 LD=ld.lld \
+            CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             KSU_VERSION=11950 \
-            KSU_SRC=$(pwd)/drivers/kernelsu
+            KSU_SRC=$(pwd)/drivers/kernelsu"
 
-      - name: 8. Упаковка AnyKernel3 (GKI 2.0)
-        run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
-          cd ak3
-          sed -i "s/device.name1=.*/device.name1=vermeer/" anykernel.sh
-          sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
-          sed -i 's|^block=.*|block=auto;|' anykernel.sh
-          
-          # Копируем скомпилированное ядро
-          if [ -f ../kernel/out/arch/arm64/boot/Image.gz ]; then
-            cp ../kernel/out/arch/arm64/boot/Image.gz ./Image.gz
-          else
-            cp ../kernel/out/arch/arm64/boot/Image ./Image
+          # Умный поиск дефконфига (от Gemini)
+          CONF_FILE=$(find arch/arm64/configs \
+            -name "vermeer_defconfig" -o \
+            -name "kalama_defconfig" | head -n 1)
+
+          if [ -z "$CONF_FILE" ]; then
+            echo "❌ Дефконфиг не найден!"
+            ls arch/arm64/configs/
+            exit 1
           fi
-          
-          zip -r9 ../Vermeer-Monolith-v24.zip * -x .git README.md
 
-      - name: 9. Загрузка Ядра
+          DEF=$(echo $CONF_FILE | sed 's|arch/arm64/configs/||')
+          echo "✅ Используем: $DEF"
+
+          mkdir -p out
+          make $MAKE_FLAGS $DEF
+
+          # ─────────────────────────────────────────────
+          # КОНФИГУРАЦИЯ (--file out/.config — правильно!)
+          # ─────────────────────────────────────────────
+
+          # ROOT И МАСКИРОВКА
+          ./scripts/config --file out/.config \
+            -e KSU \
+            -e KSU_SUSFS \
+            -e KSU_SUSFS_SUS_PATH \
+            -e KSU_SUSFS_SUS_MOUNT \
+            -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_SPOOF_CMDLINE
+
+          # СЕТЬ
+          ./scripts/config --file out/.config \
+            -e TCP_CONG_BBR \
+            --set-str DEFAULT_TCP_CONG bbr \
+            -e NET_SCH_FQ_CODEL \
+            -e TCP_CONG_WESTWOOD \
+            -e TCP_FASTOPEN \
+            -e WIREGUARD \
+            -e MPTCP \
+            -e NET_SCH_HTB \
+            -e NET_SCH_INGRESS \
+            -e NET_CLS_FLOWER \
+            -e NET_ACT_POLICE \
+            -e NET_FLOW_LIMIT \
+            -e BPF_JIT \
+            -e INET_ESP \
+            -e INET_AH \
+            -e XFRM_USER \
+            -e L2TP \
+            -e GRE \
+            -e VXLAN \
+            -e IPV6_ROUTER_PREF \
+            -e IPV6_ROUTE_INFO \
+            -e IPV6_SUBTREES \
+            -e IPV6_MROUTE
+
+          # CPU И ПЛАНИРОВЩИК
+          ./scripts/config --file out/.config \
+            -e CPU_FREQ_GOV_SCHEDUTIL \
+            -e SCHED_CORE \
+            -e UCLAMP_TASK \
+            -e CGROUP_SCHED \
+            -e PSI \
+            -e RCU_NOCB_CPU \
+            -e IRQ_FORCED_THREADING \
+            -e HIGH_RES_TIMERS \
+            -e NO_HZ_IDLE \
+            -e RCU_BOOST \
+            -e PREEMPT_DYNAMIC
+
+          # Vendor-специфичные опции (могут отсутствовать в AOSP GKI)
+          ./scripts/config --file out/.config \
+            -e SCHED_WALT            || true
+          ./scripts/config --file out/.config \
+            -e CPU_BOOST             || true
+          ./scripts/config --file out/.config \
+            -e DYNAMIC_STUNE_BOOST   || true
+          ./scripts/config --file out/.config \
+            -e SCHED_CLUSTER         || true
+
+          # ПАМЯТЬ
+          ./scripts/config --file out/.config \
+            -e ZRAM \
+            -e CRYPTO_ZSTD \
+            -e ZRAM_DEF_COMP_ZSTD \
+            -e LRU_GEN \
+            -e LRU_GEN_ENABLED \
+            -e LRU_GEN_STATS \
+            -e TRANSPARENT_HUGEPAGE \
+            -e ZSWAP \
+            -e MEMCG \
+            -e MEMCG_SWAP \
+            -e KSM \
+            -e ZPOOL
+
+          # I/O ПЛАНИРОВЩИКИ
+          ./scripts/config --file out/.config \
+            -e MQ_IOSCHED_KYBER \
+            -e MQ_IOSCHED_BFQ \
+            -e BLK_WBT \
+            -e BLK_CGROUP_IOLATENCY \
+            -e BLK_DEV_ZONED \
+            --set-str DEFAULT_IOSCHED kyber
+
+          # БАТАРЕЯ И ПИТАНИЕ
+          ./scripts/config --file out/.config \
+            -e PM_AUTOSLEEP \
+            -e PM_WAKELOCKS \
+            -e ENERGY_MODEL \
+            -e CPU_IDLE_GOV_TEO \
+            -e SUSPEND_FREEZER \
+            -e CPU_FREQ_TIMES \
+            -e QCOM_RPMHPD
+
+          # ФАЙЛОВЫЕ СИСТЕМЫ
+          ./scripts/config --file out/.config \
+            -e F2FS_FS \
+            -e FUSE_FS \
+            -e OVERLAY_FS \
+            -e EROFS_FS \
+            -e NTFS3 \
+            -e EXFAT_FS \
+            -e BTRFS_FS \
+            -e BLK_DEV_LOOP \
+            -e BLK_DEV_RAM \
+            -e DM_CRYPT \
+            -e DM_VERITY
+
+          # ANDROID
+          ./scripts/config --file out/.config \
+            -e ANDROID_BINDERFS \
+            -e ANDROID_BINDER_IPC \
+            -e SYNC_FILE \
+            -e SW_SYNC
+
+          # КОНТЕЙНЕРЫ И NAMESPACES
+          ./scripts/config --file out/.config \
+            -e NAMESPACES \
+            -e PID_NS \
+            -e NET_NS \
+            -e UTS_NS \
+            -e IPC_NS \
+            -e USER_NS \
+            -e TIME_NS \
+            -e CGROUPS \
+            -e CGROUP_BPF \
+            -e KVM \
+            -e KVM_ARM_HOST
+
+          # QUALCOMM ЖЕЛЕЗО
+          ./scripts/config --file out/.config \
+            -e QCOM_LLCC \
+            -e QCOM_RPMH \
+            -e QCOM_SMEM \
+            -e QCOM_AOSS_QMP \
+            -e QCOM_CPUFREQ_HW \
+            -e QCOM_SCM
+
+          # КРИПТОГРАФИЯ
+          ./scripts/config --file out/.config \
+            -e CRYPTO_AES_ARM64 \
+            -e CRYPTO_SHA256_ARM64 \
+            -e CRYPTO_CHACHA20_NEON \
+            -e CRYPTO_POLY1305_NEON \
+            -e CRYPTO_GCM \
+            -e CRYPTO_BLAKE2B \
+            -e CRYPTO_AES_CE_BLK \
+            -e CRYPTO_SHA2_ARM64_CE \
+            -e CRYPTO_GHASH_ARM64_CE \
+            -e KERNEL_MODE_NEON \
+            -e CRYPTO_SIMD \
+            -e CRYPTO_LZO \
+            -e CRYPTO_LZ4 \
+            -e CRYPTO_LZ4HC \
+            -e CRYPTO_DEFLATE
+
+          # БЕЗОПАСНОСТЬ
+          ./scripts/config --file out/.config \
+            -e DEBUG_INFO_BTF \
+            -e KALLSYMS_ALL \
+            -e KPROBES \
+            -e RANDOMIZE_BASE \
+            -e STRICT_KERNEL_RWX \
+            -e STRICT_MODULE_RWX \
+            -e INIT_ON_ALLOC_DEFAULT_ON \
+            -e FORTIFY_SOURCE \
+            -e STACKPROTECTOR_STRONG \
+            -e SHADOW_CALL_STACK \
+            -e HARDENED_USERCOPY
+
+          # BLUETOOTH И БЕСПРОВОДНЫЕ
+          ./scripts/config --file out/.config \
+            -e BT_RFCOMM \
+            -e BT_BNEP \
+            -e BT_HIDP \
+            -e BT_LEDS \
+            -e CFG80211_WEXT \
+            -e NFC
+
+          # USB
+          ./scripts/config --file out/.config \
+            -e USB_CONFIGFS \
+            -e USB_GADGET \
+            -e USB_ETH \
+            -e USB_MASS_STORAGE \
+            -m USB_SERIAL \
+            -m TUN \
+            -m PPP
+
+          # ТРАССИРОВКА
+          ./scripts/config --file out/.config \
+            -e PERF_EVENTS \
+            -e TASK_IO_ACCOUNTING \
+            -e CPUFREQ_STATS \
+            -e FTRACE \
+            -e FUNCTION_TRACER \
+            -e DYNAMIC_FTRACE \
+            -e UPROBE_EVENTS \
+            -e TRACEPOINTS \
+            -e BPF_EVENTS \
+            -e KRETPROBES \
+            -e HIST_TRIGGERS \
+            -e SYNTH_EVENTS \
+            -e IKCONFIG \
+            -e IKCONFIG_PROC \
+            -e UNIX \
+            -e UNIX_DIAG \
+            -e NETLINK_DIAG \
+            -e PACKET_DIAG \
+            -e INET_DIAG \
+            -e FUTEX \
+            -e PI_FUTEXES \
+            -e INPUT_EVDEV \
+            -e INPUT_UINPUT \
+            -e HID_MULTITOUCH
+
+          # ФИНАЛИЗАЦИЯ
+          make $MAKE_FLAGS olddefconfig
+
+          cp out/.config ../config_backup.txt
+          echo "✅ Конфигурация готова ($(wc -l < out/.config) строк)"
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 12 — Компиляция
+      # Gemini: CROSS_COMPILE_COMPAT, KSU_SRC, O=out
+      # Моя: ccache, все LLVM инструменты, сохранение лога
+      # ═══════════════════════════════════════════════════════════
+      - name: 12. Компиляция ядра
+        working-directory: kernel
+        run: |
+          make -j$(nproc --all) \
+            O=out \
+            ARCH=arm64 \
+            CC="ccache clang" \
+            HOSTCC="ccache gcc" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            KSU_VERSION=11950 \
+            KSU_SRC=$(pwd)/drivers/kernelsu \
+            2>&1 | tee ../build.log
+
+          # Проверяем результат
+          if [ ! -f "out/arch/arm64/boot/Image" ] && \
+             [ ! -f "out/arch/arm64/boot/Image.gz" ]; then
+            echo "❌ Image не найден — сборка провалилась!"
+            echo "=== Последние 80 строк лога ==="
+            tail -80 ../build.log
+            exit 1
+          fi
+
+          ccache -s
+          echo "✅ Ядро собрано!"
+          ls -lh out/arch/arm64/boot/Image* 2>/dev/null || true
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 13 — Сохранение лога (даже если всё упало)
+      # ═══════════════════════════════════════════════════════════
+      - name: 13. Сохранение лога сборки
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Vermeer-Monolith-v24
-          path: Vermeer-Monolith-v24.zip
+          name: build-log
+          path: build.log
+          retention-days: 7
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 14 — Упаковка AnyKernel3
+      # Gemini: block=auto (умнее хардкода)
+      # Моя: проверка sed, дата в имени, конфиг внутри zip
+      # ═══════════════════════════════════════════════════════════
+      - name: 14. Упаковка AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3 \
+            || { echo "❌ Не удалось клонировать AnyKernel3"; exit 1; }
+
+          cd ak3
+          BUILD_DATE=$(date +%Y%m%d-%H%M)
+
+          sed -i "s/kernel.string=.*/kernel.string=Ultimate-Gadzhi-Kernel-${BUILD_DATE}/" anykernel.sh
+          sed -i "s/device.name1=.*/device.name1=vermeer/"                               anykernel.sh
+          sed -i "s/do.devicecheck=.*/do.devicecheck=1/"                                 anykernel.sh
+          sed -i "s/is_slot_device=.*/is_slot_device=1/"                                 anykernel.sh
+          # block=auto — AnyKernel3 сам найдёт boot раздел (от Gemini)
+          sed -i 's|^block=.*|block=auto;|'                                              anykernel.sh
+
+          # Проверяем sed
+          grep -q "vermeer"        anykernel.sh || echo "⚠️ device.name не установлен"
+          grep -q "is_slot_device=1" anykernel.sh || echo "⚠️ is_slot_device не установлен"
+
+          # Копируем Image
+          if [ -f "../kernel/out/arch/arm64/boot/Image" ]; then
+            cp "../kernel/out/arch/arm64/boot/Image" ./
+            echo "✅ Скопирован Image"
+          elif [ -f "../kernel/out/arch/arm64/boot/Image.gz" ]; then
+            cp "../kernel/out/arch/arm64/boot/Image.gz" ./
+            echo "✅ Скопирован Image.gz"
+          else
+            echo "❌ Image не найден!"
+            exit 1
+          fi
+
+          # dtbo если есть
+          [ -f "../kernel/out/arch/arm64/boot/dtbo.img" ] && \
+            cp "../kernel/out/arch/arm64/boot/dtbo.img" ./ && \
+            echo "✅ Скопирован dtbo.img"
+
+          # Конфиг внутрь zip для отладки
+          cp "../config_backup.txt" ./kernel_config.txt
+
+          ZIP_NAME="Ultimate-Gadzhi-Kernel-Vermeer-${BUILD_DATE}.zip"
+          zip -r9 "../${ZIP_NAME}" * -x .git README.md
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          echo "✅ ZIP: ${ZIP_NAME} ($(du -sh ../${ZIP_NAME} | cut -f1))"
+
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 15 — Загрузка артефакта
+      # ═══════════════════════════════════════════════════════════
+      - name: 15. Загрузка готового ядра
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ultimate-Gadzhi-Kernel-Vermeer
+          path: Ultimate-Gadzhi-Kernel-Vermeer-*.zip
+          retention-days: 30
+          compression-level: 0
