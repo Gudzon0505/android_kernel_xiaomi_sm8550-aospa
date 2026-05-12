@@ -22,7 +22,7 @@ jobs:
           echo "✅ Диск очищен"
 
       # ═══════════════════════════════════════════════════════════
-      # ШАГ 2 — Зависимости (добавлен ccache, убран дубль python3)
+      # ШАГ 2 — Зависимости (добавлен ccache)
       # ═══════════════════════════════════════════════════════════
       - name: 2. Системные зависимости
         run: |
@@ -37,7 +37,6 @@ jobs:
             gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu \
             binutils-arm-linux-gnueabi
-          # Проверяем обязательные инструменты
           which ccache || { echo "❌ ccache не установлен"; exit 1; }
           echo "✅ Зависимости установлены"
 
@@ -129,13 +128,12 @@ jobs:
           path: kernel
 
       # ═══════════════════════════════════════════════════════════
-      # ШАГ 8 — Фикс сломанных Xiaomi драйверов (исправлен код заглушки)
+      # ШАГ 8 — Фикс сломанных Xiaomi драйверов
       # ═══════════════════════════════════════════════════════════
       - name: 8. Фикс сломанных Xiaomi драйверов
         working-directory: kernel
         run: |
           mkdir -p drivers/xiaomi
-          # Исправленная заглушка: добавлены необходимые заголовки и MODULE_LICENSE
           cat > drivers/xiaomi/dummy.c << 'EOF'
           #include <linux/module.h>
           #include <linux/init.h>
@@ -145,18 +143,13 @@ jobs:
           MODULE_LICENSE("GPL");
           MODULE_DESCRIPTION("Xiaomi dummy driver");
           EOF
-
-          # Makefile (дописываем, а не перезаписываем, на случай повторного запуска)
           echo "obj-y += dummy.o" >> drivers/xiaomi/Makefile
-
-          # Убираем битые ссылки на Kconfig
           sed -i '/hwid\/Kconfig/d'       drivers/misc/Kconfig   || true
           sed -i '/xiaomi\/Kconfig/d'     drivers/misc/Kconfig   || true
-
           echo "✅ Xiaomi заглушки созданы"
 
       # ═══════════════════════════════════════════════════════════
-      # ШАГ 9 — Интеграция ReSukiSU (улучшена безопасность копирования)
+      # ШАГ 9 — Интеграция ReSukiSU
       # ═══════════════════════════════════════════════════════════
       - name: 9. Интеграция ReSukiSU
         working-directory: kernel
@@ -171,7 +164,6 @@ jobs:
           fi
 
           mkdir -p drivers/kernelsu
-          # Копируем все файлы, исключая возможный вложенный .git
           cp -a ksutmp/kernel/* drivers/kernelsu/ 2>/dev/null || true
           cp -a ksutmp/kernel/.??* drivers/kernelsu/ 2>/dev/null || true
           rm -rf drivers/kernelsu/.git 2>/dev/null || true
@@ -182,14 +174,12 @@ jobs:
             exit 1
           fi
 
-          # Хак обхода git submodule проверки в Kbuild
           if [ -f "drivers/kernelsu/Kbuild" ]; then
             sed -i 's/ifneq ($(shell cd $(KSU_SRC); git rev-parse --is-inside-work-tree 2>\/dev\/null),true)/ifneq (true,true)/g' \
               drivers/kernelsu/Kbuild
             echo "✅ Git submodule хак применён"
           fi
 
-          # Прописываем в систему сборки (идемпотентно)
           grep -q "kernelsu" drivers/Makefile || \
             echo "obj-y += kernelsu/" >> drivers/Makefile
 
@@ -199,7 +189,7 @@ jobs:
           echo "✅ ReSukiSU интегрирован"
 
       # ═══════════════════════════════════════════════════════════
-      # ШАГ 10 — Интеграция SUSFS (безопасный порядок и копирование)
+      # ШАГ 10 — Интеграция SUSFS (ПАТЧ KSU – из корня ядра!)
       # ═══════════════════════════════════════════════════════════
       - name: 10. Интеграция SUSFS v2.10
         working-directory: kernel
@@ -208,7 +198,7 @@ jobs:
             -b gki-android13-5.15 susfs_patches \
             || { echo "❌ Не удалось клонировать SUSFS"; exit 1; }
 
-          # 1. Патч ядра (основные изменения)
+          # 1. Патч ядра
           SUSFS_PATCH=$(ls susfs_patches/kernel_patches/50_add_susfs_in_*.patch 2>/dev/null | head -n 1)
           if [ -f "$SUSFS_PATCH" ]; then
             patch -p1 --forward < "$SUSFS_PATCH" 2>&1 | tee /tmp/susfs.log
@@ -222,26 +212,23 @@ jobs:
             echo "⚠️ Патч ядра не найден"
           fi
 
-          # 2. Дополнительные файлы из репозитория SUSFS (только если они не конфликтуют с патчем)
-          # Обычно патч уже включает всё необходимое, но для совместимости оставляем копирование
+          # 2. Дополнительные файлы
           cp -a susfs_patches/kernel_patches/fs/.           fs/            2>/dev/null || true
           cp -a susfs_patches/kernel_patches/include/linux/. include/linux/ 2>/dev/null || true
 
-          # 3. Патч KernelSU
+          # 3. Патч KernelSU — применяется ИЗ КОРНЯ ЯДРА (не cd!) для поиска файлов по путям в патче
           KSU_PATCH="susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
           if [ -f "$KSU_PATCH" ]; then
-            cd drivers/kernelsu
-            patch -p1 --forward < "../../$KSU_PATCH" 2>&1 | tee /tmp/ksu.log
+            patch -p1 --forward < "$KSU_PATCH" 2>&1 | tee /tmp/ksu.log
             if grep -q "FAILED\|can't find file\|malformed" /tmp/ksu.log; then
               echo "❌ Патч KSU упал с ошибкой!"
               exit 1
             fi
-            cd ../..
             echo "✅ Патч KSU наложен"
           fi
 
       # ═══════════════════════════════════════════════════════════
-      # ШАГ 11 — Конфигурация ядра (все опции с защитой от отсутствия)
+      # ШАГ 11 — Конфигурация ядра
       # ═══════════════════════════════════════════════════════════
       - name: 11. Конфигурация ядра
         working-directory: kernel
@@ -270,7 +257,7 @@ jobs:
           mkdir -p out
           make $MAKE_FLAGS $DEF
 
-          # Все вызовы scripts/config обёрнуты в || true, чтобы избежать падения на отсутствующих опциях
+          # Все опции с защитой от отсутствия (|| true)
           ./scripts/config --file out/.config \
             -e KSU \
             -e KSU_SUSFS \
@@ -317,7 +304,6 @@ jobs:
             -e RCU_BOOST \
             -e PREEMPT_DYNAMIC || true
 
-          # Vendor-специфичные опции (могут отсутствовать в GKI 2.0)
           ./scripts/config --file out/.config -e SCHED_WALT          || true
           ./scripts/config --file out/.config -e CPU_BOOST           || true
           ./scripts/config --file out/.config -e DYNAMIC_STUNE_BOOST || true
@@ -432,7 +418,7 @@ jobs:
             -e CFG80211_WEXT \
             -e NFC || true
 
-          # USB — всё встроено, никаких модулей (для GKI 2.0)
+          # USB — всё встроено, никаких модулей
           ./scripts/config --file out/.config \
             -e USB_CONFIGFS \
             -e USB_GADGET \
@@ -473,7 +459,7 @@ jobs:
           echo "✅ Конфигурация готова ($(wc -l < out/.config) строк)"
 
       # ═══════════════════════════════════════════════════════════
-      # ШАГ 12 — Компиляция (сборка Image и модулей, если остались)
+      # ШАГ 12 — Компиляция ядра
       # ═══════════════════════════════════════════════════════════
       - name: 12. Компиляция ядра
         working-directory: kernel
@@ -522,7 +508,7 @@ jobs:
           retention-days: 7
 
       # ═══════════════════════════════════════════════════════════
-      # ШАГ 14 — Упаковка AnyKernel3 (block=auto, для boot-раздела)
+      # ШАГ 14 — Упаковка AnyKernel3 (block=auto)
       # ═══════════════════════════════════════════════════════════
       - name: 14. Упаковка AnyKernel3
         run: |
@@ -531,13 +517,10 @@ jobs:
 
           cd ak3
 
-          # Настройка anykernel.sh: block=auto, do.devicecheck=0
           sed -i "s|block=.*|block=auto|" anykernel.sh
           sed -i "s|do.devicecheck=.*|do.devicecheck=0|" anykernel.sh
-          # Отключаем проверку версии Android (ставим "skip")
           sed -i "s|#android.make=/system/bin/make|android.make=skip|" anykernel.sh
 
-          # Копируем Image (сжатый или обычный)
           if [ -f ../kernel/out/arch/arm64/boot/Image.gz ]; then
             cp ../kernel/out/arch/arm64/boot/Image.gz ./
             echo "✅ Используем Image.gz"
@@ -549,13 +532,11 @@ jobs:
             exit 1
           fi
 
-          # Копируем dtb, если есть (необязательно для GKI 2.0, но AnyKernel может использовать)
           if [ -d ../kernel/out/arch/arm64/boot/dts ]; then
             cp -r ../kernel/out/arch/arm64/boot/dts ./
             echo "✅ DTB скопированы"
           fi
 
-          # Создаём zip-архив с датой и уникальным суффиксом
           ZIPNAME="GadzhiKernel-Vermeer-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../${ZIPNAME}" * -x .git README.md
           cd ..
