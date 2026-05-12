@@ -60,11 +60,11 @@ jobs:
 
       - name: 4. Проверка тулчейна
         run: |
-          clang --version          || { echo "❌ clang не найден!";              exit 1; }
-          ld.lld --version         || { echo "❌ ld.lld не найден!";             exit 1; }
-          llvm-ar --version        || { echo "❌ llvm-ar не найден!";            exit 1; }
-          llvm-objcopy --version   || { echo "❌ llvm-objcopy не найден!";       exit 1; }
-          llvm-strip --version     || { echo "❌ llvm-strip не найден!";         exit 1; }
+          clang --version          || { echo "❌ clang не найден!";          exit 1; }
+          ld.lld --version         || { echo "❌ ld.lld не найден!";         exit 1; }
+          llvm-ar --version        || { echo "❌ llvm-ar не найден!";        exit 1; }
+          llvm-objcopy --version   || { echo "❌ llvm-objcopy не найден!";   exit 1; }
+          llvm-strip --version     || { echo "❌ llvm-strip не найден!";     exit 1; }
           aarch64-linux-gnu-gcc --version || { echo "❌ cross-compiler не найден!"; exit 1; }
           echo "✅ Тулчейн готов"
 
@@ -106,6 +106,10 @@ jobs:
           fetch-depth: 1
           path: kernel
 
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 8 — Фикс сломанных Xiaomi драйверов
+      # MODULE_LICENSE("GPL") обязателен чтобы не было kernel taint
+      # ═══════════════════════════════════════════════════════════
       - name: 8. Фикс сломанных Xiaomi драйверов
         working-directory: kernel
         run: |
@@ -120,42 +124,58 @@ jobs:
           MODULE_DESCRIPTION("Xiaomi dummy driver");
           EOF
           echo "obj-y += dummy.o" >> drivers/xiaomi/Makefile
-          sed -i '/hwid\/Kconfig/d'       drivers/misc/Kconfig   || true
-          sed -i '/xiaomi\/Kconfig/d'     drivers/misc/Kconfig   || true
+          sed -i '/hwid\/Kconfig/d'   drivers/misc/Kconfig || true
+          sed -i '/xiaomi\/Kconfig/d' drivers/misc/Kconfig || true
           echo "✅ Xiaomi заглушки созданы"
 
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 9 — Интеграция ReSukiSU
+      # ═══════════════════════════════════════════════════════════
       - name: 9. Интеграция ReSukiSU
         working-directory: kernel
         run: |
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp \
             || { echo "❌ Не удалось клонировать ReSukiSU"; exit 1; }
+
           if [ ! -d "ksutmp/kernel" ]; then
             echo "❌ Папка ksutmp/kernel не найдена!"
             ls -la ksutmp/
             exit 1
           fi
+
           mkdir -p drivers/kernelsu
+          # Копируем обычные файлы
           cp -a ksutmp/kernel/* drivers/kernelsu/ 2>/dev/null || true
+          # Копируем скрытые файлы (кроме .git)
           cp -a ksutmp/kernel/.??* drivers/kernelsu/ 2>/dev/null || true
+          # Удаляем .git если скопировался
           rm -rf drivers/kernelsu/.git 2>/dev/null || true
+
           if [ ! -f "drivers/kernelsu/Kconfig" ]; then
             echo "❌ Kconfig не скопировался!"
             ls -la drivers/kernelsu/
             exit 1
           fi
+
+          # Хак обхода git submodule проверки в Kbuild
           if [ -f "drivers/kernelsu/Kbuild" ]; then
             sed -i 's/ifneq ($(shell cd $(KSU_SRC); git rev-parse --is-inside-work-tree 2>\/dev\/null),true)/ifneq (true,true)/g' \
               drivers/kernelsu/Kbuild
             echo "✅ Git submodule хак применён"
           fi
+
+          # Прописываем в систему сборки
           grep -q "kernelsu" drivers/Makefile || \
             echo "obj-y += kernelsu/" >> drivers/Makefile
           grep -q "kernelsu" drivers/Kconfig || \
             sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
           echo "✅ ReSukiSU интегрирован"
 
       # ═══════════════════════════════════════════════════════════
-      # ШАГ 10 — Интеграция SUSFS (ПАТЧ KSU адаптирован под drivers/kernelsu)
+      # ШАГ 10 — Интеграция SUSFS
+      # ИСПРАВЛЕНО: патч KSU применяется ИЗНУТРИ drivers/kernelsu
+      # а не из корня ядра с sed-хаком (который ломал hunks)
       # ═══════════════════════════════════════════════════════════
       - name: 10. Интеграция SUSFS v2.10
         working-directory: kernel
@@ -164,7 +184,7 @@ jobs:
             -b gki-android13-5.15 susfs_patches \
             || { echo "❌ Не удалось клонировать SUSFS"; exit 1; }
 
-          # 1. Патч ядра
+          # 1. Патч ядра (применяем из корня ядра)
           SUSFS_PATCH=$(ls susfs_patches/kernel_patches/50_add_susfs_in_*.patch 2>/dev/null | head -n 1)
           if [ -f "$SUSFS_PATCH" ]; then
             patch -p1 --forward < "$SUSFS_PATCH" 2>&1 | tee /tmp/susfs.log
@@ -178,22 +198,25 @@ jobs:
             echo "⚠️ Патч ядра не найден"
           fi
 
-          # 2. Дополнительные файлы
-          cp -a susfs_patches/kernel_patches/fs/.           fs/            2>/dev/null || true
+          # 2. Дополнительные файлы SUSFS
+          cp -a susfs_patches/kernel_patches/fs/.            fs/            2>/dev/null || true
           cp -a susfs_patches/kernel_patches/include/linux/. include/linux/ 2>/dev/null || true
 
-          # 3. Патч KernelSU — заменяем все "kernel/" на "drivers/kernelsu/" в патче,
-          #    так как наш KSU лежит в drivers/kernelsu, а патч ожидает корневую kernel/
+          # 3. Патч KernelSU — входим ВНУТРЬ drivers/kernelsu и применяем там
+          #    Патч написан для применения изнутри папки KSU, не из корня ядра
           KSU_PATCH="susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
           if [ -f "$KSU_PATCH" ]; then
-            # Создаём исправленную копию патча
-            sed 's|kernel/|drivers/kernelsu/|g' "$KSU_PATCH" > /tmp/ksu_patch_fixed.patch
-            patch -p1 --forward < /tmp/ksu_patch_fixed.patch 2>&1 | tee /tmp/ksu.log
+            cd drivers/kernelsu
+            patch -p1 --forward < "../../$KSU_PATCH" 2>&1 | tee /tmp/ksu.log
             if grep -q "FAILED\|can't find file\|malformed" /tmp/ksu.log; then
               echo "❌ Патч KSU упал с ошибкой!"
+              cat /tmp/ksu.log
               exit 1
             fi
+            cd ../..
             echo "✅ Патч KSU наложен"
+          else
+            echo "⚠️ Патч KSU не найден"
           fi
 
       # ═══════════════════════════════════════════════════════════
@@ -213,17 +236,19 @@ jobs:
           CONF_FILE=$(find arch/arm64/configs \
             -name "vermeer_defconfig" -o \
             -name "kalama_defconfig" | head -n 1)
+
           if [ -z "$CONF_FILE" ]; then
             echo "❌ Дефконфиг не найден!"
             ls arch/arm64/configs/
             exit 1
           fi
+
           DEF=$(echo $CONF_FILE | sed 's|arch/arm64/configs/||')
           echo "✅ Используем: $DEF"
           mkdir -p out
           make $MAKE_FLAGS $DEF
 
-          # Все опции с защитой от отсутствия
+          # ROOT И МАСКИРОВКА
           ./scripts/config --file out/.config \
             -e KSU \
             -e KSU_SUSFS \
@@ -232,6 +257,7 @@ jobs:
             -e KSU_SUSFS_SPOOF_UNAME \
             -e KSU_SUSFS_SPOOF_CMDLINE || true
 
+          # СЕТЬ
           ./scripts/config --file out/.config \
             -e TCP_CONG_BBR \
             --set-str DEFAULT_TCP_CONG bbr \
@@ -257,6 +283,7 @@ jobs:
             -e IPV6_SUBTREES \
             -e IPV6_MROUTE || true
 
+          # CPU И ПЛАНИРОВЩИК
           ./scripts/config --file out/.config \
             -e CPU_FREQ_GOV_SCHEDUTIL \
             -e SCHED_CORE \
@@ -270,11 +297,13 @@ jobs:
             -e RCU_BOOST \
             -e PREEMPT_DYNAMIC || true
 
+          # Vendor-специфичные (могут отсутствовать в GKI)
           ./scripts/config --file out/.config -e SCHED_WALT          || true
           ./scripts/config --file out/.config -e CPU_BOOST           || true
           ./scripts/config --file out/.config -e DYNAMIC_STUNE_BOOST || true
           ./scripts/config --file out/.config -e SCHED_CLUSTER       || true
 
+          # ПАМЯТЬ
           ./scripts/config --file out/.config \
             -e ZRAM \
             -e CRYPTO_ZSTD \
@@ -289,6 +318,7 @@ jobs:
             -e KSM \
             -e ZPOOL || true
 
+          # I/O
           ./scripts/config --file out/.config \
             -e MQ_IOSCHED_KYBER \
             -e MQ_IOSCHED_BFQ \
@@ -297,6 +327,7 @@ jobs:
             -e BLK_DEV_ZONED \
             --set-str DEFAULT_IOSCHED kyber || true
 
+          # БАТАРЕЯ
           ./scripts/config --file out/.config \
             -e PM_AUTOSLEEP \
             -e PM_WAKELOCKS \
@@ -306,6 +337,7 @@ jobs:
             -e CPU_FREQ_TIMES \
             -e QCOM_RPMHPD || true
 
+          # ФАЙЛОВЫЕ СИСТЕМЫ
           ./scripts/config --file out/.config \
             -e F2FS_FS \
             -e FUSE_FS \
@@ -319,12 +351,14 @@ jobs:
             -e DM_CRYPT \
             -e DM_VERITY || true
 
+          # ANDROID
           ./scripts/config --file out/.config \
             -e ANDROID_BINDERFS \
             -e ANDROID_BINDER_IPC \
             -e SYNC_FILE \
             -e SW_SYNC || true
 
+          # КОНТЕЙНЕРЫ И NAMESPACES
           ./scripts/config --file out/.config \
             -e NAMESPACES \
             -e PID_NS \
@@ -338,6 +372,7 @@ jobs:
             -e KVM \
             -e KVM_ARM_HOST || true
 
+          # QUALCOMM ЖЕЛЕЗО
           ./scripts/config --file out/.config \
             -e QCOM_LLCC \
             -e QCOM_RPMH \
@@ -346,6 +381,7 @@ jobs:
             -e QCOM_CPUFREQ_HW \
             -e QCOM_SCM || true
 
+          # КРИПТОГРАФИЯ
           ./scripts/config --file out/.config \
             -e CRYPTO_AES_ARM64 \
             -e CRYPTO_SHA256_ARM64 \
@@ -363,6 +399,7 @@ jobs:
             -e CRYPTO_LZ4HC \
             -e CRYPTO_DEFLATE || true
 
+          # БЕЗОПАСНОСТЬ
           ./scripts/config --file out/.config \
             -e DEBUG_INFO_BTF \
             -e KALLSYMS_ALL \
@@ -376,6 +413,7 @@ jobs:
             -e SHADOW_CALL_STACK \
             -e HARDENED_USERCOPY || true
 
+          # BLUETOOTH И БЕСПРОВОДНЫЕ
           ./scripts/config --file out/.config \
             -e BT_RFCOMM \
             -e BT_BNEP \
@@ -384,6 +422,7 @@ jobs:
             -e CFG80211_WEXT \
             -e NFC || true
 
+          # USB
           ./scripts/config --file out/.config \
             -e USB_CONFIGFS \
             -e USB_GADGET \
@@ -393,6 +432,7 @@ jobs:
             -e TUN \
             -e PPP || true
 
+          # ТРАССИРОВКА И МОНИТОРИНГ
           ./scripts/config --file out/.config \
             -e PERF_EVENTS \
             -e TASK_IO_ACCOUNTING \
@@ -419,10 +459,14 @@ jobs:
             -e INPUT_UINPUT \
             -e HID_MULTITOUCH || true
 
+          # ФИНАЛИЗАЦИЯ
           make $MAKE_FLAGS olddefconfig
           cp out/.config ../config_backup.txt
           echo "✅ Конфигурация готова ($(wc -l < out/.config) строк)"
 
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 12 — Компиляция
+      # ═══════════════════════════════════════════════════════════
       - name: 12. Компиляция ядра
         working-directory: kernel
         run: |
@@ -445,6 +489,7 @@ jobs:
             KSU_VERSION=11950 \
             KSU_SRC=$(pwd)/drivers/kernelsu \
             2>&1 | tee ../build.log
+
           if [ ! -f "out/arch/arm64/boot/Image" ] && \
              [ ! -f "out/arch/arm64/boot/Image.gz" ]; then
             echo "❌ Image не найден — сборка провалилась!"
@@ -452,26 +497,38 @@ jobs:
             tail -80 ../build.log
             exit 1
           fi
+
           ccache -s
           echo "✅ Ядро собрано!"
           ls -lh out/arch/arm64/boot/Image* 2>/dev/null || true
 
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 13 — Лог сборки
+      # ИСПРАВЛЕНО: путь kernel/build.log (компиляция в working-dir kernel)
+      # ═══════════════════════════════════════════════════════════
       - name: 13. Сохранение лога сборки
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: build.log
+          path: kernel/build.log
           retention-days: 7
 
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 14 — Упаковка AnyKernel3
+      # ═══════════════════════════════════════════════════════════
       - name: 14. Упаковка AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3 \
             || { echo "❌ Не удалось клонировать AnyKernel3"; exit 1; }
+
           cd ak3
-          sed -i "s|block=.*|block=auto|" anykernel.sh
-          sed -i "s|do.devicecheck=.*|do.devicecheck=0|" anykernel.sh
-          sed -i "s|#android.make=/system/bin/make|android.make=skip|" anykernel.sh
+          sed -i "s|block=.*|block=auto|"             anykernel.sh
+          sed -i "s|do.devicecheck=.*|do.devicecheck=1|" anykernel.sh
+          sed -i "s|is_slot_device=.*|is_slot_device=1|" anykernel.sh
+          sed -i "s|device.name1=.*|device.name1=vermeer|" anykernel.sh
+
+          # Копируем Image
           if [ -f ../kernel/out/arch/arm64/boot/Image.gz ]; then
             cp ../kernel/out/arch/arm64/boot/Image.gz ./
             echo "✅ Используем Image.gz"
@@ -482,19 +539,30 @@ jobs:
             echo "❌ Нет образа ядра для упаковки"
             exit 1
           fi
+
+          # DTB если есть
           if [ -d ../kernel/out/arch/arm64/boot/dts ]; then
             cp -r ../kernel/out/arch/arm64/boot/dts ./
             echo "✅ DTB скопированы"
           fi
+
+          # Конфиг внутрь zip для отладки
+          cp ../config_backup.txt ./kernel_config.txt
+
           ZIPNAME="GadzhiKernel-Vermeer-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "../${ZIPNAME}" * -x .git README.md
           cd ..
-          echo "✅ AnyKernel3 собран: ${ZIPNAME}"
+
+          echo "✅ ZIP собран: ${ZIPNAME}"
           echo "zip_name=${ZIPNAME}" >> $GITHUB_ENV
 
-      - name: Загрузка готового ядра
+      # ═══════════════════════════════════════════════════════════
+      # ШАГ 15 — Загрузка артефакта
+      # ═══════════════════════════════════════════════════════════
+      - name: 15. Загрузка готового ядра
         uses: actions/upload-artifact@v4
         with:
           name: GadzhiKernel-Vermeer
           path: ${{ env.zip_name }}
           retention-days: 30
+          compression-level: 0
