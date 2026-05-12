@@ -1,4 +1,4 @@
-name: ULTIMATE Vermeer Kernel (MiCode Official)
+name: ULTIMATE Vermeer Kernel (MiCode / The Elegant Fix)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev ccache rsync device-tree-compiler lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-      - name: 2. Загрузка MiCode (По твоей ссылке)
+      - name: 2. Загрузка MiCode (bsp-vermeer-t-oss)
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
@@ -29,16 +29,13 @@ jobs:
           tar -xJf *.tar.xz --strip-components=1
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
 
-      - name: 4. Интеграция ReSukiSU + SUSFS
+      - name: 4. Чистая Интеграция ReSukiSU + SUSFS
         working-directory: kernel
         run: |
-          # Внедрение KSU
+          # Внедрение KSU (Без грязных хаков Kbuild!)
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
           mkdir -p drivers/kernelsu
-          cp -a ksutmp/kernel/. drivers/kernelsu/
-          
-          # Безопасный фикс: "глушим" ошибку защиты, оставляя синтаксис (endif) целым
-          sed -i 's/$(error.*/ /g' drivers/kernelsu/Kbuild
+          cp -a ksutmp/kernel/* drivers/kernelsu/
           
           grep -q "kernelsu" drivers/Makefile || echo "obj-y += kernelsu/" >> drivers/Makefile
           grep -q "kernelsu" drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
@@ -53,13 +50,11 @@ jobs:
       - name: 5. Фикс багов MiCode (Kconfig)
         working-directory: kernel
         run: |
-          # В официальном MiCode есть битая ссылка, вырезаем её
           sed -i '/hwid\/Kconfig/d' drivers/misc/Kconfig || true
 
       - name: 6. Конфигурация (MiCode Defconfig)
         working-directory: kernel
         run: |
-          # Ищем конфиги именно в структуре MiCode
           if [ -f arch/arm64/configs/vendor/vermeer_defconfig ]; then
             DEFCMD="vendor/vermeer_defconfig"
           elif [ -f arch/arm64/configs/vendor/kalama_defconfig ]; then
@@ -69,21 +64,26 @@ jobs:
           fi
           echo "🚀 Используем: $DEFCMD"
           
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCMD
+          # ВАЖНО: Передаем KSU_VERSION прямо в make, чтобы Kbuild не паниковал
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 KSU_VERSION=11950 $DEFCMD
           
-          # Накатываем маскировку и турбо-твики
           ./scripts/config --file out/.config \
             -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE \
             -e DEBUG_INFO_BTF -e KALLSYMS_ALL -e KPROBES \
             -e TCP_CONG_BBR --set-str DEFAULT_TCP_CONG bbr -e NET_SCH_FQ_CODEL \
             -e LRU_GEN -e LRU_GEN_ENABLED -e MQ_IOSCHED_KYBER
           
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 KSU_VERSION=11950 olddefconfig
 
-      - name: 7. Компиляция Ядра
+      - name: 7. Компиляция Ядра (The Core Fix)
         working-directory: kernel
         run: |
-          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="clang" LD="ld.lld" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- KSU_SRC=$(pwd)/drivers/kernelsu
+          # ВАЖНО: KSU_VERSION=11950 гарантирует, что пути uapi/ подключатся правильно
+          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CC="clang" LD="ld.lld" \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            KSU_VERSION=11950 \
+            KSU_SRC=$(pwd)/drivers/kernelsu
 
       - name: 8. Упаковка GKI в BOOT
         run: |
@@ -91,8 +91,6 @@ jobs:
           cd ak3
           sed -i "s/device.name1=.*/device.name1=vermeer/" anykernel.sh
           sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
-          
-          # Чистый GKI шьется только в boot
           sed -i 's|^block=.*|block=auto;|' anykernel.sh
           
           if [ -f ../kernel/out/arch/arm64/boot/Image ]; then
@@ -101,10 +99,10 @@ jobs:
             echo "❌ Файл Image не найден!" && exit 1
           fi
           
-          zip -r9 ../Gadzhi-Vermeer-MiCode-Pure.zip * -x .git README.md *placeholder
+          zip -r9 ../Gadzhi-Vermeer-MiCode-Perfect.zip * -x .git README.md *placeholder
 
       - name: 9. Загрузка Артефакта
         uses: actions/upload-artifact@v4
         with:
-          name: Gadzhi-Vermeer-MiCode-Pure
-          path: Gadzhi-Vermeer-MiCode-Pure.zip
+          name: Gadzhi-Vermeer-MiCode-Perfect
+          path: Gadzhi-Vermeer-MiCode-Perfect.zip
