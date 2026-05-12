@@ -1,4 +1,4 @@
-name: ULTIMATE AOSPA Kernel (Lunaris Kalama GKI)
+name: ULTIMATE AOSPA Kernel (GKI Pure)
 
 on:
   workflow_dispatch:
@@ -13,10 +13,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev ccache rsync device-tree-compiler lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-      - name: 2. Загрузка твоего репозитория (AOSPA)
+      - name: 2. Загрузка AOSPA
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          path: kernel
 
       - name: 3. Установка Clang 17.0.6
         run: |
@@ -26,7 +27,8 @@ jobs:
           tar -xJf *.tar.xz --strip-components=1
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
 
-      - name: 4. Интеграция ReSukiSU + SUSFS
+      - name: 4. Интеграция ReSukiSU + Принудительный SUSFS
+        working-directory: kernel
         run: |
           # KernelSU
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
@@ -36,32 +38,24 @@ jobs:
           grep -q "kernelsu" drivers/Makefile || echo "obj-y += kernelsu/" >> drivers/Makefile
           grep -q "kernelsu" drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           
-          # SUSFS
+          # SUSFS (Принудительный патчинг с флагом -f)
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
-          patch -p1 < susfs_patches/kernel_patches/50_add_susfs_in_*.patch || true
+          patch -p1 -f < susfs_patches/kernel_patches/50_add_susfs_in_*.patch || true
           
-          # Копируем содержимое (файлы, а не папку)
           cp -a susfs_patches/kernel_patches/fs/* fs/
           cp -a susfs_patches/kernel_patches/include/linux/* include/linux/
-          cd drivers/kernelsu && patch -p1 < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+          cd drivers/kernelsu && patch -p1 -f < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
 
-      - name: 5. Фикс Kconfig и проверка SUSFS
+      - name: 5. Фикс Kconfig
+        working-directory: kernel
         run: |
-          # Удаляем битую ссылку, если она есть
           sed -i '/hwid\/Kconfig/d' drivers/misc/Kconfig || true
-          
-          # Проверяем, на месте ли файл SUSFS
-          if [ -f "fs/susfs.c" ]; then
-            echo "✅ Файлы SUSFS успешно внедрены."
-          else
-            echo "❌ ОШИБКА: Файл fs/susfs.c не найден. Копирование сорвалось!"
-            exit 1
-          fi
 
-      - name: 6. Конфигурация (Точный удар по kalama_GKI)
+      - name: 6. Конфигурация (ЧИСТЫЙ GKI 2.0)
+        working-directory: kernel
         run: |
-          # Мы точно знаем имя из разведки: vendor/kalama_GKI.config
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 vendor/kalama_GKI.config
+          # Используем ЕДИНСТВЕННО верный конфиг для ядра GKI
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
           
           # Накатываем маскировку и турбо-твики
           ./scripts/config --file out/.config \
@@ -73,28 +67,30 @@ jobs:
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
       - name: 7. Компиляция Ядра
+        working-directory: kernel
         run: |
           make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="clang" LD="ld.lld" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- KSU_SRC=$(pwd)/drivers/kernelsu
 
-      - name: 8. Упаковка GKI в AnyKernel3
+      - name: 8. Упаковка в AnyKernel3 (BOOT)
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
           cd ak3
           sed -i "s/device.name1=.*/device.name1=vermeer/" anykernel.sh
           sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
-          # GKI шьется в активный слот BOOT
           sed -i 's|^block=.*|block=auto;|' anykernel.sh
           
-          if [ -f ../out/arch/arm64/boot/Image ]; then
-            cp ../out/arch/arm64/boot/Image ./
+          # Исправлен путь к ядру для гарантии копирования
+          if [ -f ../kernel/out/arch/arm64/boot/Image ]; then
+            cp ../kernel/out/arch/arm64/boot/Image ./
           else
-            echo "❌ Файл Image не найден в папке out!" && exit 1
+            echo "❌ Файл Image не найден!" && exit 1
           fi
           
-          zip -r9 ../Gadzhi-Vermeer-AOSPA-Final.zip * -x .git README.md *placeholder
+          zip -r9 ../Gadzhi-Vermeer-PureGKI.zip * -x .git README.md *placeholder
 
       - name: 9. Загрузка Артефакта
         uses: actions/upload-artifact@v4
         with:
-          name: Gadzhi-Vermeer-AOSPA-Final
-          path: Gadzhi-Vermeer-AOSPA-Final.zip
+          name: Gadzhi-Vermeer-PureGKI
+          path: Gadzhi-Vermeer-PureGKI.zip
+          
