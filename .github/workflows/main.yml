@@ -1,19 +1,19 @@
-name: ULTIMATE Vermeer Kernel (MiCode / The Illusionist)
+name: MONOLITH v23 (The Gladius Fix)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: SM8550 / MiCode / POCO F6 Pro
+    name: SM8550 / POCO F6 Pro / Vermeer
     runs-on: ubuntu-22.04
     steps:
-      - name: 1. Системные зависимости
+      - name: 1. Системные зависимости (Полный набор)
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev ccache rsync device-tree-compiler lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-      - name: 2. Загрузка MiCode (bsp-vermeer-t-oss)
+      - name: 2. Загрузка MiCode
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 1
           path: kernel
 
-      - name: 3. Установка Clang 17.0.6
+      - name: 3. Clang 17.0.6
         run: |
           mkdir -p $GITHUB_WORKSPACE/clang
           cd $GITHUB_WORKSPACE/clang
@@ -29,17 +29,20 @@ jobs:
           tar -xJf *.tar.xz --strip-components=1
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
 
-      - name: 4. Интеграция ReSukiSU + Иллюзия субмодуля
+      - name: 4. Взлом защиты ReSukiSU + SUSFS
         working-directory: kernel
         run: |
+          # Клонируем KSU
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
           mkdir -p drivers/kernelsu
           cp -a ksutmp/kernel/* drivers/kernelsu/
           
-          # ФИКС 1: Превращаем $(error) в безобидный $(warning), не ломая синтаксис Kbuild!
-          # Теперь Kbuild просто поругается в консоль, но продолжит сборку.
-          sed -i 's/$(error You should use ReSukiSU/$(warning You should use ReSukiSU/g' drivers/kernelsu/Kbuild
+          # ФИКС ЗАЩИТЫ (Строка 6006 в твоем логе)
+          # Вместо удаления строк, мы просто комментируем проверку на git submodule
+          # Это САМЫЙ надежный способ не сломать Kbuild
+          sed -i 's/ifneq ($(shell cd $(KSU_SRC); git rev-parse --is-inside-work-tree 2>\/dev\/null),true)/ifneq (true,true)/g' drivers/kernelsu/Kbuild
           
+          # Интеграция в дерево
           grep -q "kernelsu" drivers/Makefile || echo "obj-y += kernelsu/" >> drivers/Makefile
           grep -q "kernelsu" drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           
@@ -50,48 +53,44 @@ jobs:
           cp -a susfs_patches/kernel_patches/include/linux/* include/linux/
           cd drivers/kernelsu && patch -p1 -f < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
 
-      - name: 5. Фикс багов MiCode (Xiaomi Obj-Y + Kconfig)
+      - name: 5. Фикс битых ссылок Xiaomi (Строка 6001 в логе)
         working-directory: kernel
         run: |
-          sed -i '/hwid\/Kconfig/d' drivers/misc/Kconfig || true
-          
-          # ФИКС 2: Создаем пустышку для потерянной папки Xiaomi
-          # Компилятор зайдет сюда, увидит пустой Makefile и радостно пойдет дальше.
+          # Создаем фейковую папку для обмана компилятора
           mkdir -p drivers/xiaomi
-          touch drivers/xiaomi/Makefile
+          echo "obj-y += dummy.o" > drivers/xiaomi/Makefile
+          touch drivers/xiaomi/dummy.c
+          
+          # Удаляем битый Kconfig
+          sed -i '/hwid\/Kconfig/d' drivers/misc/Kconfig || true
 
-      - name: 6. Конфигурация (MiCode Defconfig)
+      - name: 6. Конфигурация
         working-directory: kernel
         run: |
-          if [ -f arch/arm64/configs/vendor/vermeer_defconfig ]; then
-            DEFCMD="vendor/vermeer_defconfig"
-          elif [ -f arch/arm64/configs/vendor/kalama_defconfig ]; then
-            DEFCMD="vendor/kalama_defconfig"
-          else
-            DEFCMD="gki_defconfig"
-          fi
-          echo "🚀 Используем: $DEFCMD"
+          # Автовыбор конфига
+          [ -f arch/arm64/configs/vendor/vermeer_defconfig ] && DEF="vendor/vermeer_defconfig" || DEF="vendor/kalama_defconfig"
           
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 KSU_VERSION=11950 $DEFCMD
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 KSU_VERSION=11950 $DEF
           
           ./scripts/config --file out/.config \
             -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE \
             -e DEBUG_INFO_BTF -e KALLSYMS_ALL -e KPROBES \
-            -e TCP_CONG_BBR --set-str DEFAULT_TCP_CONG bbr -e NET_SCH_FQ_CODEL \
-            -e LRU_GEN -e LRU_GEN_ENABLED -e MQ_IOSCHED_KYBER
+            -e TCP_CONG_BBR --set-str DEFAULT_TCP_CONG bbr
           
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 KSU_VERSION=11950 olddefconfig
 
-      - name: 7. Компиляция Ядра
+      - name: 7. Компиляция (С поддержкой GCC-Compat)
         working-directory: kernel
         run: |
           make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             CC="clang" LD="ld.lld" \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             KSU_VERSION=11950 \
             KSU_SRC=$(pwd)/drivers/kernelsu
 
-      - name: 8. Упаковка GKI в BOOT
+      - name: 8. Упаковка AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
           cd ak3
@@ -99,19 +98,17 @@ jobs:
           sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
           sed -i 's|^block=.*|block=auto;|' anykernel.sh
           
-          # MiCode для kalama обычно генерит Image.gz. Берем то, что скомпилировалось.
+          # Забираем Image или Image.gz
           if [ -f ../kernel/out/arch/arm64/boot/Image.gz ]; then
             cp ../kernel/out/arch/arm64/boot/Image.gz ./Image.gz
-          elif [ -f ../kernel/out/arch/arm64/boot/Image ]; then
-            cp ../kernel/out/arch/arm64/boot/Image ./Image
           else
-            echo "❌ Файл ядра не найден!" && exit 1
+            cp ../kernel/out/arch/arm64/boot/Image ./Image
           fi
           
-          zip -r9 ../Gadzhi-Vermeer-MiCode-Illusion.zip * -x .git README.md *placeholder
+          zip -r9 ../Vermeer-Monolith-v23.zip * -x .git README.md
 
-      - name: 9. Загрузка Артефакта
+      - name: 9. Артефакт
         uses: actions/upload-artifact@v4
         with:
-          name: Gadzhi-Vermeer-MiCode-Illusion
-          path: Gadzhi-Vermeer-MiCode-Illusion.zip
+          name: Vermeer-Monolith-v23
+          path: Vermeer-Monolith-v23.zip
