@@ -207,7 +207,8 @@ jobs:
           KSU_PATCH="susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
           if [ -f "$KSU_PATCH" ]; then
             cd drivers/kernelsu
-            patch -p1 --forward < "../../$KSU_PATCH" 2>&1 | tee /tmp/ksu.log
+            # -p2 срезает "a/kernel/" из путей патча, оставляя "supercall/..." итд
+            patch -p2 --forward < "../../$KSU_PATCH" 2>&1 | tee /tmp/ksu.log
             if grep -q "FAILED\|can't find file\|malformed" /tmp/ksu.log; then
               echo "❌ Патч KSU упал с ошибкой!"
               cat /tmp/ksu.log
@@ -511,7 +512,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: kernel/build.log
+          path: build.log
           retention-days: 7
 
       # ═══════════════════════════════════════════════════════════
