@@ -1,112 +1,32 @@
-name: ULTIMATE Vermeer Kernel (AOSPA / Lunaris Edition)
+name: AOSPA Kernel Reconnaissance (SM8550)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: SM8550 / AOSPA / POCO F6 Pro
+  recon:
+    name: Разведка дерева AOSPA
     runs-on: ubuntu-22.04
     steps:
-      - name: 1. Системные зависимости
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev ccache rsync device-tree-compiler lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
-
-      - name: 2. Загрузка ТВОЕГО репозитория (AOSPA)
+      - name: 1. Загрузка исходников
         uses: actions/checkout@v4
         with:
-          # Убрана привязка к MiCode! Теперь качается репозиторий, из которого запущен Action.
           fetch-depth: 1
-          path: kernel
 
-      - name: 3. Установка Clang 17.0.6 (Lunaris Match)
+      - name: 2. Поиск сборочных скриптов (Build Scripts)
         run: |
-          mkdir -p $GITHUB_WORKSPACE/clang
-          cd $GITHUB_WORKSPACE/clang
-          curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-          tar -xJf *.tar.xz --strip-components=1
-          echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
-
-      - name: 4. Бронебойная Интеграция ReSukiSU + SUSFS
-        working-directory: kernel
+          echo "🔍 Ищу скрипты сборки в корне..."
+          find . -maxdepth 2 -name "*.sh" -type f
+          echo "-----------------------------------"
+          
+      - name: 3. Поиск всех Defconfig для arm64
         run: |
-          # Внедрение KSU
-          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
-          mkdir -p drivers/kernelsu
-          cp -a ksutmp/kernel/. drivers/kernelsu/
-          sed -i '/git/,+4d' drivers/kernelsu/Kbuild
-          grep -q "kernelsu" drivers/Makefile || echo "obj-y += kernelsu/" >> drivers/Makefile
-          grep -q "kernelsu" drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-          
-          # Патчинг SUSFS
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
-          patch -p1 < susfs_patches/kernel_patches/50_add_susfs_in_*.patch || true
-          
-          # ЖЕСТКОЕ КОПИРОВАНИЕ с проверкой (никаких /*)
-          cp -a susfs_patches/kernel_patches/fs/susfs fs/ || echo "⚠️ Папка fs/susfs не скопирована"
-          cp -a susfs_patches/kernel_patches/include/linux/susfs* include/linux/ || true
-          cd drivers/kernelsu && patch -p1 < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+          echo "🔍 Ищу дефконфиги для Snapdragon 8 Gen 2..."
+          find arch/arm64/configs -type f | grep -iE 'vermeer|kalama|sm8550|aospa|gki'
+          echo "-----------------------------------"
 
-      - name: 5. Интеллектуальный Kconfig Фикс (Защита от Error 2)
-        working-directory: kernel
+      - name: 4. Проверка Makefile
         run: |
-          sed -i '/hwid\/Kconfig/d' drivers/misc/Kconfig || true
-          
-          # Подключаем SUSFS только если файлы реально существуют!
-          if [ -f "fs/susfs/Kconfig" ]; then
-            grep -q "susfs" fs/Kconfig || echo 'source "fs/susfs/Kconfig"' >> fs/Kconfig
-            grep -q "susfs" fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs/' >> fs/Makefile
-            echo "✅ SUSFS успешно внедрен."
-          else
-            echo "❌ ОШИБКА: Папка fs/susfs не найдена! Прерываю сборку, чтобы избежать Error 2."
-            exit 1
-          fi
-
-      - name: 6. Поиск конфига AOSPA / Lunaris
-        working-directory: kernel
-        run: |
-          # В AOSPA конфиг может называться aospa_defconfig или sm8550_defconfig
-          DEF_FILE=$(find arch/arm64/configs -type f \( -name "*vermeer*" -o -name "*aospa*" -o -name "*sm8550*" \) | grep defconfig | head -n 1)
-          [ -z "$DEF_FILE" ] && DEF_FILE="arch/arm64/configs/gki_defconfig"
-          
-          DEFCONFIG=$(echo "$DEF_FILE" | sed 's|arch/arm64/configs/||')
-          echo "🚀 Выбран конфиг: $DEFCONFIG"
-          
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 "$DEFCONFIG"
-          
-          # Накатываем маскировку
-          ./scripts/config --file out/.config \
-            -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE \
-            -e DEBUG_INFO_BTF -e KALLSYMS_ALL -e KPROBES \
-            -e TCP_CONG_BBR --set-str DEFAULT_TCP_CONG bbr -e NET_SCH_FQ_CODEL \
-            -e LRU_GEN -e LRU_GEN_ENABLED -e MQ_IOSCHED_KYBER
-          
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
-
-      - name: 7. КОМПИЛЯЦИЯ ЯДРА
-        working-directory: kernel
-        run: |
-          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="clang" LD="ld.lld" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- KSU_SRC=$(pwd)/drivers/kernelsu
-
-      - name: 8. Упаковка GKI в BOOT
-        run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
-          cd ak3
-          sed -i "s/device.name1=.*/device.name1=vermeer/" anykernel.sh
-          sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
-          sed -i 's|^block=.*|block=auto;|' anykernel.sh
-          
-          if [ -f ../kernel/out/arch/arm64/boot/Image ]; then
-            cp ../kernel/out/arch/arm64/boot/Image ./
-          else
-            echo "❌ Файл ядра не найден!" && exit 1
-          fi
-          
-          zip -r9 ../Gadzhi-Vermeer-AOSPA.zip * -x .git README.md *placeholder
-
-      - name: 9. Загрузка Артефакта
-        uses: actions/upload-artifact@v4
-        with:
-          name: Gadzhi-Vermeer-AOSPA
-          path: Gadzhi-Vermeer-AOSPA.zip
+          echo "🔍 Версия ядра и архитектура..."
+          head -n 5 Makefile
+          echo "-----------------------------------"
