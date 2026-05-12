@@ -1,4 +1,4 @@
-name: MONOLITH v23 (The Gladius Fix)
+name: MONOLITH v24 (The Final Strike)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev ccache rsync device-tree-compiler lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-      - name: 2. Загрузка MiCode
+      - name: 2. Загрузка MiCode (Vermeer OSS)
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 1
           path: kernel
 
-      - name: 3. Clang 17.0.6
+      - name: 3. Установка Clang 17.0.6
         run: |
           mkdir -p $GITHUB_WORKSPACE/clang
           cd $GITHUB_WORKSPACE/clang
@@ -32,46 +32,54 @@ jobs:
       - name: 4. Взлом защиты ReSukiSU + SUSFS
         working-directory: kernel
         run: |
-          # Клонируем KSU
+          # Клонируем KernelSU
           git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
           mkdir -p drivers/kernelsu
           cp -a ksutmp/kernel/* drivers/kernelsu/
           
-          # ФИКС ЗАЩИТЫ (Строка 6006 в твоем логе)
-          # Вместо удаления строк, мы просто комментируем проверку на git submodule
-          # Это САМЫЙ надежный способ не сломать Kbuild
+          # ОБХОД ЗАЩИТЫ: Превращаем проверку git submodule в "пустышку"
+          # Это предотвращает остановку сборки из-за отсутствия .git в папке KSU
           sed -i 's/ifneq ($(shell cd $(KSU_SRC); git rev-parse --is-inside-work-tree 2>\/dev\/null),true)/ifneq (true,true)/g' drivers/kernelsu/Kbuild
           
-          # Интеграция в дерево
+          # Прописываем KSU в систему сборки
           grep -q "kernelsu" drivers/Makefile || echo "obj-y += kernelsu/" >> drivers/Makefile
           grep -q "kernelsu" drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           
-          # SUSFS
+          # Интеграция SUSFS
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
           patch -p1 -f < susfs_patches/kernel_patches/50_add_susfs_in_*.patch || true
           cp -a susfs_patches/kernel_patches/fs/* fs/
           cp -a susfs_patches/kernel_patches/include/linux/* include/linux/
           cd drivers/kernelsu && patch -p1 -f < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
 
-      - name: 5. Фикс битых ссылок Xiaomi (Строка 6001 в логе)
+      - name: 5. Фикс битых ссылок Xiaomi
         working-directory: kernel
         run: |
-          # Создаем фейковую папку для обмана компилятора
+          # Создаем фейковую папку драйверов (Xiaomi удалила их перед публикацией)
           mkdir -p drivers/xiaomi
           echo "obj-y += dummy.o" > drivers/xiaomi/Makefile
-          touch drivers/xiaomi/dummy.c
+          echo "int main() { return 0; }" > drivers/xiaomi/dummy.c
           
-          # Удаляем битый Kconfig
+          # Удаляем битый Kconfig из misc
           sed -i '/hwid\/Kconfig/d' drivers/misc/Kconfig || true
 
-      - name: 6. Конфигурация
+      - name: 6. Конфигурация (Умный поиск Defconfig)
         working-directory: kernel
         run: |
-          # Автовыбор конфига
-          [ -f arch/arm64/configs/vendor/vermeer_defconfig ] && DEF="vendor/vermeer_defconfig" || DEF="vendor/kalama_defconfig"
+          # Динамический поиск файла конфига, если Xiaomi изменила структуру папок
+          CONF_FILE=$(find arch/arm64/configs -name "vermeer_defconfig" -o -name "kalama_defconfig" -o -name "gki_defconfig" | head -n 1)
+          
+          if [ -z "$CONF_FILE" ]; then
+            echo "❌ Конфиг не найден!" && exit 1
+          fi
+          
+          # Получаем относительный путь для команды make
+          DEF=$(echo $CONF_FILE | sed 's|arch/arm64/configs/||')
+          echo "🚀 Нашли и используем конфиг: $DEF"
           
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 KSU_VERSION=11950 $DEF
           
+          # Включаем маскировку и оптимизации
           ./scripts/config --file out/.config \
             -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE \
             -e DEBUG_INFO_BTF -e KALLSYMS_ALL -e KPROBES \
@@ -79,9 +87,10 @@ jobs:
           
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 KSU_VERSION=11950 olddefconfig
 
-      - name: 7. Компиляция (С поддержкой GCC-Compat)
+      - name: 7. Компиляция Ядра
         working-directory: kernel
         run: |
+          # Собираем с поддержкой GCC-Compat для vDSO
           make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             CC="clang" LD="ld.lld" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -90,7 +99,7 @@ jobs:
             KSU_VERSION=11950 \
             KSU_SRC=$(pwd)/drivers/kernelsu
 
-      - name: 8. Упаковка AnyKernel3
+      - name: 8. Упаковка AnyKernel3 (GKI 2.0)
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
           cd ak3
@@ -98,17 +107,17 @@ jobs:
           sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
           sed -i 's|^block=.*|block=auto;|' anykernel.sh
           
-          # Забираем Image или Image.gz
+          # Копируем скомпилированное ядро
           if [ -f ../kernel/out/arch/arm64/boot/Image.gz ]; then
             cp ../kernel/out/arch/arm64/boot/Image.gz ./Image.gz
           else
             cp ../kernel/out/arch/arm64/boot/Image ./Image
           fi
           
-          zip -r9 ../Vermeer-Monolith-v23.zip * -x .git README.md
+          zip -r9 ../Vermeer-Monolith-v24.zip * -x .git README.md
 
-      - name: 9. Артефакт
+      - name: 9. Загрузка Ядра
         uses: actions/upload-artifact@v4
         with:
-          name: Vermeer-Monolith-v23
-          path: Vermeer-Monolith-v23.zip
+          name: Vermeer-Monolith-v24
+          path: Vermeer-Monolith-v24.zip
