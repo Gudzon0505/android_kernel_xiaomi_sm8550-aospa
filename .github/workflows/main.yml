@@ -1,56 +1,19 @@
-name: Build Vermeer Kernel (v3 - Resilient)
+name: ULTIMATE Vermeer Kernel (Lunaris 3.10)
 
 on:
   workflow_dispatch:
-    inputs:
-      clang_version:
-        description: 'Clang version'
-        required: false
-        default: '17.0.6'
-      disable_btf:
-        description: 'Disable BTF (если pahole старый)'
-        type: boolean
-        default: false
-      disable_lto:
-        description: 'Disable LTO (для быстрой отладки)'
-        type: boolean
-        default: false
 
 jobs:
   build:
     name: SM8550 / Vermeer / POCO F6 Pro
     runs-on: ubuntu-22.04
-    env:
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: "5G"
-      KBUILD_BUILD_USER: "gadzhi"
-      KBUILD_BUILD_HOST: "github-actions"
-      ARCH: arm64
-
     steps:
-      # ════════════════════════════════════════════
-      # ЭТАП 1: ОКРУЖЕНИЕ
-      # ════════════════════════════════════════════
       - name: 1. Системные зависимости
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            bc bison build-essential cpio curl flex git gnupg gperf \
-            libssl-dev libxml2-utils zip zstd python3 python-is-python3 \
-            dwarves libelf-dev ccache rsync \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
-            device-tree-compiler lld llvm
-          
-          echo "── Версии инструментов ──"
-          pahole --version || echo "pahole отсутствует"
-          ccache --version | head -1
-          aarch64-linux-gnu-ld --version | head -1
+          sudo apt-get install -y bc bison build-essential cpio curl flex git gnupg gperf libssl-dev libxml2-utils zip zstd python3 dwarves libelf-dev ccache rsync device-tree-compiler lld llvm
 
-      # ════════════════════════════════════════════
-      # ЭТАП 2: ИСХОДНИКИ ЯДРА
-      # ════════════════════════════════════════════
-      - name: 2. Клонирование ядра Xiaomi (Vermeer T-OSS)
+      - name: 2. Загрузка исходников Xiaomi (Vermeer T-OSS)
         uses: actions/checkout@v4
         with:
           repository: MiCode/Xiaomi_Kernel_OpenSource
@@ -58,479 +21,94 @@ jobs:
           fetch-depth: 1
           path: kernel
 
-      - name: 2.1 Проверка содержимого ядра
-        working-directory: kernel
+      - name: 3. Установка Clang 17.0.6 (Lunaris Match)
         run: |
-          echo "── Корень репозитория ──"
-          ls -la | head -20
-          echo ""
-          echo "── Версия ядра ──"
-          head -5 Makefile
-          echo ""
-          echo "── Конфиги для arm64 ──"
-          find arch/arm64/configs -type f | head -30
-
-      # ════════════════════════════════════════════
-      # ЭТАП 3: CLANG
-      # ════════════════════════════════════════════
-      - name: 3. Кэш Clang
-        id: clang-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/clang
-          key: clang-${{ github.event.inputs.clang_version }}-ubuntu22
-
-      - name: 3.1 Скачивание Clang
-        if: steps.clang-cache.outputs.cache-hit != 'true'
-        run: |
-          set -e
-          CLANG_VER="${{ github.event.inputs.clang_version }}"
           mkdir -p $GITHUB_WORKSPACE/clang
           cd $GITHUB_WORKSPACE/clang
-          
-          URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VER}/clang+llvm-${CLANG_VER}-x86_64-linux-gnu-ubuntu-22.04.tar.xz"
-          echo "📥 Скачиваю: $URL"
-          curl -L --fail -o clang.tar.xz "$URL"
-          
-          tar -xJf clang.tar.xz --strip-components=1
-          rm clang.tar.xz
-          
-          if [ ! -x bin/clang ]; then
-            echo "❌ Clang не установлен"
-            exit 1
-          fi
-
-      - name: 3.2 Активация Clang
-        run: |
+          curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          tar -xJf *.tar.xz --strip-components=1
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
-          $GITHUB_WORKSPACE/clang/bin/clang --version
 
-      # ════════════════════════════════════════════
-      # ЭТАП 4: CCACHE
-      # ════════════════════════════════════════════
-      - name: 4. Кэш ccache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ccache-vermeer-${{ github.run_id }}
-          restore-keys: |
-            ccache-vermeer-
-
-      - name: 4.1 Инициализация ccache
-        run: |
-          mkdir -p $CCACHE_DIR
-          ccache -M $CCACHE_MAXSIZE
-          ccache -s
-
-      # ════════════════════════════════════════════
-      # ЭТАП 5: KERNELSU (ReSukiSU)
-      # 🟡 НЕ МОГУ ПРОВЕРИТЬ актуальность репозитория
-      # ════════════════════════════════════════════
-      - name: 5. Интеграция KernelSU
+      - name: 4. Интеграция ReSukiSU + SUSFS (Правильный порядок)
         working-directory: kernel
         run: |
-          set -e
-          
-          # Клонируем во временную папку РЯДОМ с kernel
-          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ../ksu_src
-          
-          echo "── Структура ReSukiSU ──"
-          ls -la ../ksu_src
-          
-          # Ищем папку с исходниками ядра в KSU
-          # Возможные имена: kernel/, KernelSU/, ksu/
-          KSU_KERNEL_DIR=""
-          for dir in kernel KernelSU ksu; do
-            if [ -d "../ksu_src/$dir" ] && [ -f "../ksu_src/$dir/Makefile" -o -f "../ksu_src/$dir/Kbuild" ]; then
-              KSU_KERNEL_DIR="../ksu_src/$dir"
-              break
-            fi
-          done
-          
-          if [ -z "$KSU_KERNEL_DIR" ]; then
-            echo "❌ В ReSukiSU не найдена папка с kernel-кодом"
-            echo "Структура репозитория:"
-            find ../ksu_src -maxdepth 2 -type d
-            exit 1
-          fi
-          
-          echo "✅ Используем: $KSU_KERNEL_DIR"
-          
-          # Копируем
+          # KernelSU
+          git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git ksutmp
           mkdir -p drivers/kernelsu
-          cp -af "$KSU_KERNEL_DIR"/. drivers/kernelsu/
+          cp -af ksutmp/kernel/. drivers/kernelsu/
+          sed -i '/git/,+4d' drivers/kernelsu/Kbuild
+          echo "obj-y += kernelsu/" >> drivers/Makefile
+          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           
-          echo "── drivers/kernelsu/ ──"
-          ls drivers/kernelsu/ | head -20
-          
-          # Удаляем git-зависимости из Kbuild (фиксируем версию)
-          if [ -f drivers/kernelsu/Kbuild ]; then
-            # Сохраняем оригинал
-            cp drivers/kernelsu/Kbuild drivers/kernelsu/Kbuild.bak
-            
-            # Удаляем строки с shell git (типичный паттерн)
-            sed -i '/\$(shell.*git/d' drivers/kernelsu/Kbuild
-            sed -i '/getKernelSUVersion/,/endif/d' drivers/kernelsu/Kbuild 2>/dev/null || true
-            
-            # Если KSU_VERSION не определён — задаём фиксированный
-            if ! grep -q "KSU_VERSION" drivers/kernelsu/Kbuild; then
-              echo 'ccflags-y += -DKSU_VERSION=12000' >> drivers/kernelsu/Kbuild
-            fi
-            
-            echo "── Изменённый Kbuild ──"
-            head -30 drivers/kernelsu/Kbuild
-          fi
-          
-          # Регистрация в Makefile (идемпотентно)
-          if ! grep -q "kernelsu" drivers/Makefile; then
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-            echo "✅ Добавлено в drivers/Makefile"
-          fi
-          
-          # Регистрация в Kconfig (перед endmenu, иначе в конец)
-          if ! grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
-            if grep -q "^endmenu" drivers/Kconfig; then
-              sed -i '0,/^endmenu/{s|^endmenu|source "drivers/kernelsu/Kconfig"\nendmenu|}' drivers/Kconfig
-            else
-              echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-            fi
-            echo "✅ Добавлено в drivers/Kconfig"
-          fi
-          
+          # SUSFS (Патч -> Копирование)
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs_patches
+          patch -p1 < susfs_patches/kernel_patches/50_add_susfs_in_*.patch || true
+          cp -r susfs_patches/kernel_patches/fs/* ./fs/
+          cp -r susfs_patches/kernel_patches/include/linux/* ./include/linux/
+          cd drivers/kernelsu && patch -p1 < "../../susfs_patches/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
           echo "KSU_SRC_PATH=$(pwd)/drivers/kernelsu" >> $GITHUB_ENV
 
-      # ════════════════════════════════════════════
-      # ЭТАП 6: SUSFS
-      # 🟡 НЕ МОГУ ПРОВЕРИТЬ актуальные имена патчей
-      # ════════════════════════════════════════════
-      - name: 6. Интеграция SUSFS
+      - name: 5. ХИРУРГИЧЕСКИЙ ФИКС Xiaomi (Удаление битых ссылок)
         working-directory: kernel
         run: |
-          set -e
-          
-          git clone --depth=1 \
-            https://gitlab.com/simonpunk/susfs4ksu.git \
-            -b gki-android13-5.15 \
-            ../susfs_src
-          
-          echo "── Структура SUSFS ──"
-          ls ../susfs_src/kernel_patches/ | head -20
-          
-          # Шаг А: копируем новые файлы
-          if [ -d ../susfs_src/kernel_patches/fs ]; then
-            cp -rv ../susfs_src/kernel_patches/fs/* fs/ || true
-          fi
-          if [ -d ../susfs_src/kernel_patches/include/linux ]; then
-            cp -rv ../susfs_src/kernel_patches/include/linux/* include/linux/ || true
-          fi
-          
-          # Шаг Б: ищем главный патч по маске (имя может варьироваться)
-          MAIN_PATCH=$(ls ../susfs_src/kernel_patches/50_add_susfs_in_*.patch 2>/dev/null | head -1)
-          
-          if [ -z "$MAIN_PATCH" ]; then
-            echo "❌ Главный SUSFS патч не найден"
-            ls ../susfs_src/kernel_patches/*.patch
-            exit 1
-          fi
-          
-          echo "📦 Главный патч: $MAIN_PATCH"
-          
-          # Пробуем dry-run сначала
-          if patch -p1 --dry-run < "$MAIN_PATCH" 2>&1 | tee /tmp/patch_dryrun.log | grep -q "FAILED"; then
-            echo "⚠️ Dry-run обнаружил проблемы. Применяем с --forward:"
-            patch -p1 --forward < "$MAIN_PATCH" || true
-          else
-            patch -p1 < "$MAIN_PATCH"
-          fi
-          
-          # Проверка на .rej файлы
-          REJ_COUNT=$(find . -name "*.rej" 2>/dev/null | wc -l)
-          if [ "$REJ_COUNT" -gt 0 ]; then
-            echo "⚠️ $REJ_COUNT .rej файлов:"
-            find . -name "*.rej"
-          fi
-          
-          # Шаг В: KSU патч SUSFS (опционально)
-          KSU_PATCH=$(ls ../susfs_src/kernel_patches/KernelSU/*.patch 2>/dev/null | head -1)
-          if [ -n "$KSU_PATCH" ] && [ -d drivers/kernelsu ]; then
-            echo "📦 KSU patch: $KSU_PATCH"
-            (cd drivers/kernelsu && patch -p1 --forward < "../../$KSU_PATCH") || \
-              echo "⚠️ KSU patch неполный (возможно SUSFS уже встроен)"
-          fi
-          
-          # Финальная проверка
-          if [ -f fs/susfs.c ] || ls fs/susfs* 2>/dev/null; then
-            echo "✅ SUSFS интегрирован"
-          else
-            echo "⚠️ Внимание: SUSFS файлы не найдены в fs/"
-          fi
+          # Жесткое удаление битой ссылки hwid/Kconfig
+          sed -i '/hwid\/Kconfig/d' drivers/misc/Kconfig
+          # Зачистка дублей и правильное подключение SUSFS
+          sed -i '/susfs/d' fs/Kconfig
+          echo 'source "fs/susfs/Kconfig"' >> fs/Kconfig
+          echo "✅ Битые ссылки MiCode зачищены."
 
-      # ════════════════════════════════════════════
-      # ЭТАП 7: КОНФИГУРАЦИЯ
-      # ════════════════════════════════════════════
-      - name: 7. Поиск и подготовка defconfig
+      - name: 6. Поиск и настройка Defconfig
         id: cfg
         working-directory: kernel
         run: |
-          set -e
-          
-          # Список кандидатов в порядке приоритета
-          CANDIDATES=(
-            "vermeer_defconfig"
-            "vermeer-qgki_defconfig"
-            "vendor/vermeer_defconfig"
-            "vendor/vermeer-qgki_defconfig"
-            "kalama_defconfig"
-            "kalama-qgki_defconfig"
-            "vendor/kalama_defconfig"
-            "vendor/kalama-qgki_defconfig"
-            "gki_defconfig"
-          )
-          
-          FOUND=""
-          for c in "${CANDIDATES[@]}"; do
-            if [ -f "arch/arm64/configs/$c" ]; then
-              FOUND="$c"
-              echo "✅ Найден: $c"
-              break
-            fi
-          done
-          
-          if [ -z "$FOUND" ]; then
-            # Последняя попытка — любой *vermeer* или *kalama*
-            FOUND=$(find arch/arm64/configs -type f $ -name "*vermeer*" -o -name "*kalama*" $ | head -1 | sed 's|arch/arm64/configs/||')
-          fi
-          
-          if [ -z "$FOUND" ]; then
-            echo "❌ Defconfig НЕ НАЙДЕН"
-            find arch/arm64/configs -type f
-            exit 1
-          fi
-          
-          echo "DEFCONFIG=$FOUND" >> $GITHUB_OUTPUT
+          CONF_PATH=$(find arch/arm64/configs -name "*vermeer*defconfig*" | head -n 1)
+          [ -z "$CONF_PATH" ] && CONF_PATH=$(find arch/arm64/configs -name "*kalama*defconfig*" | head -n 1)
+          DEFCONFIG=$(echo "$CONF_PATH" | sed 's|arch/arm64/configs/||')
+          echo "🚀 Нашёлся конфиг: $DEFCONFIG"
+          echo "DEFCONFIG=$DEFCONFIG" >> $GITHUB_OUTPUT
 
-      - name: 7.1 Генерация .config
+      - name: 7. Генерация .config (С флагами маскировки)
         working-directory: kernel
         run: |
-          set -e
           DEFCONFIG="${{ steps.cfg.outputs.DEFCONFIG }}"
-          
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out "$DEFCONFIG"
-          
-          # === KSU + SUSFS опции ===
-          ./scripts/config --file out/.config \
-            -e KSU \
-            -e KSU_SUSFS \
-            -e KSU_SUSFS_HAS_MAGIC_MOUNT \
-            -e KSU_SUSFS_SUS_PATH \
-            -e KSU_SUSFS_SUS_MOUNT \
-            -e KSU_SUSFS_SUS_KSTAT \
-            -e KSU_SUSFS_TRY_UMOUNT \
-            -e KSU_SUSFS_SPOOF_UNAME \
-            -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-            -e KSU_SUSFS_OPEN_REDIRECT \
-            -e KSU_SUSFS_ENABLE_LOG \
-            -e KALLSYMS \
-            -e KALLSYMS_ALL \
-            -e KPROBES \
-            -e HAVE_KPROBES \
-            -e KPROBE_EVENTS
-          
-          # === Условные опции ===
-          
-          # BTF: автоопределение по pahole
-          if [ "${{ github.event.inputs.disable_btf }}" = "true" ]; then
-            ./scripts/config --file out/.config -d DEBUG_INFO_BTF -d MODULE_ALLOW_BTF_MISMATCH
-            echo "⚠️ BTF отключён вручную"
-          else
-            PAHOLE_VER=$(pahole --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 | tr -d '.')
-            if [ -n "$PAHOLE_VER" ] && [ "$PAHOLE_VER" -ge 121 ]; then
-              ./scripts/config --file out/.config -e DEBUG_INFO_BTF
-              echo "✅ BTF включён (pahole $PAHOLE_VER)"
-            else
-              ./scripts/config --file out/.config -d DEBUG_INFO_BTF
-              echo "⚠️ BTF отключён (pahole слишком старый)"
-            fi
-          fi
-          
-          # LTO: тонкий по умолчанию
-          if [ "${{ github.event.inputs.disable_lto }}" = "true" ]; then
-            ./scripts/config --file out/.config \
-              -d LTO_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE
-            echo "⚠️ LTO отключён"
-          else
-            ./scripts/config --file out/.config \
-              -d LTO_CLANG_FULL -d LTO_NONE -e LTO_CLANG_THIN
-          fi
-          
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
-          
-          echo ""
-          echo "── KSU/SUSFS в финальном .config ──"
-          grep -E "^CONFIG_(KSU|SUSFS)" out/.config || echo "❌ Опции НЕ применились!"
+          # Создаем базовый конфиг в папке out/
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 "$DEFCONFIG"
+          # Внедряем KSU, SUSFS и Spoofing
+          ./scripts/config --file out/.config -e KSU -e KSU_SUSFS -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_SPOOF_CMDLINE -e CONFIG_DEBUG_INFO_BTF -e KALLSYMS_ALL -e KPROBES
+          # Применяем изменения
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-      # ════════════════════════════════════════════
-      # ЭТАП 8: КОМПИЛЯЦИЯ
-      # ════════════════════════════════════════════
-      - name: 8. Компиляция ядра
+      - name: 8. КОМПИЛЯЦИЯ ЯДРА
         working-directory: kernel
         run: |
-          set -o pipefail
-          export PATH="/usr/lib/ccache:$PATH"
-          
-          # Сохраняем .config до сборки (для дебага)
-          cp out/.config out/.config.snapshot
-          
-          set +e
-          make -j$(nproc) \
-            ARCH=arm64 \
-            O=out \
-            LLVM=1 LLVM_IAS=1 \
-            CC="ccache clang" \
-            HOSTCC="ccache clang" \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            KSU_SRC=$KSU_SRC_PATH \
-            2>&1 | tee build.log
-          BUILD_RC=${PIPESTATUS[0]}
-          set -e
-          
-          if [ $BUILD_RC -ne 0 ]; then
-            echo ""
-            echo "══════════════════════════════════════════════"
-            echo "❌ СБОРКА ПРОВАЛЕНА (код $BUILD_RC)"
-            echo "══════════════════════════════════════════════"
-            echo ""
-            echo "🔴 Первые 30 ERROR:"
-            grep -nE "(^|:)\s*error:|undefined reference|No rule to make|FAILED:" build.log | head -30
-            echo ""
-            echo "🟡 Первые 10 WARNING (контекст):"
-            grep -nE "(^|:)\s*warning:" build.log | head -10
-            echo ""
-            echo "── Последние 100 строк ──"
-            tail -100 build.log
-            exit $BUILD_RC
-          fi
-          
-          echo ""
-          echo "✅ СБОРКА УСПЕШНА"
-          echo "── Артефакты ──"
-          ls -la out/arch/arm64/boot/ 2>/dev/null || true
-          ls out/arch/arm64/boot/dts/vendor/qcom/ 2>/dev/null | head -10 || true
-          
-          ccache -s
+          # ВАЖНО: O=out гарантирует сборку из нашего модифицированного конфига
+          make -j$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC="clang" LD="ld.lld" CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- KSU_SRC=$KSU_SRC_PATH
 
-      # ════════════════════════════════════════════
-      # ЭТАП 9: УПАКОВКА
-      # ════════════════════════════════════════════
-      - name: 9. AnyKernel3 ZIP
+      - name: 9. Упаковка в AnyKernel3 (init_boot + Конкатенация DTB)
         run: |
-          set -e
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
           cd ak3
-          
-          # Конфигурация anykernel.sh
-          sed -i 's|kernel.string=.*|kernel.string=Gadzhi-Vermeer Kernel|' anykernel.sh
-          sed -i 's|do.devicecheck=.*|do.devicecheck=1|' anykernel.sh
-          sed -i 's|device.name1=.*|device.name1=vermeer|' anykernel.sh
-          sed -i 's|device.name2=.*|device.name2=Vermeer|' anykernel.sh
-          sed -i 's|device.name3=.*|device.name3=POCO F6 Pro|' anykernel.sh
-          sed -i 's|device.name4=.*|device.name4=|' anykernel.sh
-          sed -i 's|device.name5=.*|device.name5=|' anykernel.sh
-          sed -i 's|supported.versions=.*|supported.versions=|' anykernel.sh
-          sed -i 's|is_slot_device=.*|is_slot_device=1|' anykernel.sh
+          sed -i "s/device.name1=.*/device.name1=vermeer/" anykernel.sh
+          sed -i "s/is_slot_device=.*/is_slot_device=1/" anykernel.sh
           sed -i 's|block=.*|block=/dev/block/by-name/init_boot|' anykernel.sh
           
-          # === Поиск образа ядра (приоритет: Image.gz → Image → Image.gz-dtb) ===
-          BOOT_DIR="../kernel/out/arch/arm64/boot"
-          IMG=""
-          for cand in Image.gz Image Image.gz-dtb; do
-            if [ -f "$BOOT_DIR/$cand" ]; then
-              IMG="$cand"
-              break
+          # Копируем само ядро
+          cp ../kernel/out/arch/arm64/boot/Image.gz ./
+          
+          # Склеиваем все драйверы дисплея в один файл dtb
+          if [ -d "../kernel/out/arch/arm64/boot/dts/vendor/qcom" ]; then
+            DTB_FILES=$(find ../kernel/out/arch/arm64/boot/dts/vendor/qcom -name "*kalama*.dtb" -o -name "*vermeer*.dtb")
+            if [ -n "$DTB_FILES" ]; then
+              cat $DTB_FILES > ./dtb
+              echo "✅ Дисплейные драйверы (DTB) склеены и упакованы."
             fi
-          done
-          
-          if [ -z "$IMG" ]; then
-            echo "❌ Образ ядра не найден"
-            ls "$BOOT_DIR"
-            exit 1
           fi
           
-          cp "$BOOT_DIR/$IMG" ./
-          # AnyKernel3 ожидает Image.gz — переименуем при необходимости
-          if [ "$IMG" = "Image.gz-dtb" ]; then
-            mv Image.gz-dtb Image.gz
-          fi
-          echo "✅ Скопирован: $IMG → $(du -h "$IMG" 2>/dev/null | cut -f1)"
-          
-          # === DTB (склейка через cat) ===
-          DTB_SEARCH_DIRS=(
-            "$BOOT_DIR/dts/vendor/qcom"
-            "$BOOT_DIR/dts/qcom"
-            "$BOOT_DIR/dts"
-          )
-          
-          DTB_FILES=""
-          for d in "${DTB_SEARCH_DIRS[@]}"; do
-            if [ -d "$d" ]; then
-              DTB_FILES=$(find "$d" -name "*kalama*.dtb" 2>/dev/null)
-              [ -z "$DTB_FILES" ] && DTB_FILES=$(find "$d" -name "*vermeer*.dtb" 2>/dev/null)
-              [ -n "$DTB_FILES" ] && break
-            fi
-          done
-          
-          if [ -n "$DTB_FILES" ]; then
-            > dtb
-            COUNT=0
-            for f in $DTB_FILES; do
-              cat "$f" >> dtb
-              COUNT=$((COUNT+1))
-            done
-            echo "✅ DTB склеен из $COUNT файлов ($(du -h dtb | cut -f1))"
-          else
-            echo "⚠️ DTB файлы не найдены — ZIP будет без DTB"
-          fi
-          
-          # === Финальный ZIP ===
-          DATE=$(date +%Y%m%d-%H%M)
-          ZIP_NAME="Gadzhi-Vermeer-${DATE}.zip"
-          zip -r9 "../$ZIP_NAME" * -x .git README.md *placeholder
-          
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          echo "✅ ZIP: $ZIP_NAME ($(du -h "../$ZIP_NAME" | cut -f1))"
+          zip -r9 ../Gadzhi-Vermeer-Lunaris.zip *
 
-      # ════════════════════════════════════════════
-      # ЭТАП 10: АРТЕФАКТЫ
-      # ════════════════════════════════════════════
-      - name: 10. Upload ZIP
-        if: success()
+      - name: 10. Загрузка Артефакта
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_NAME }}
-          path: ${{ env.ZIP_NAME }}
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: 10.1 Upload build.log (ВСЕГДА)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: |
-            kernel/build.log
-            kernel/out/.config.snapshot
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: 10.2 Upload Image (для ручной упаковки)
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-image-raw
-          path: |
-            kernel/out/arch/arm64/boot/Image*
-            kernel/out/arch/arm64/boot/dts/vendor/qcom/*kalama*.dtb
-          if-no-files-found: warn
-          retention-days: 7
+          name: Gadzhi-Vermeer-Lunaris
+          path: Gadzhi-Vermeer-Lunaris.zip
